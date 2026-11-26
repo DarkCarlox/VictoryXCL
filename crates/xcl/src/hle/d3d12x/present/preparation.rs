@@ -4,9 +4,10 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LRESULT, WPARAM};
-use windows_sys::Win32::Foundation::{RECT, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{POINT, RECT, WAIT_OBJECT_0};
 use windows_sys::Win32::Graphics::Gdi::*;
-use windows_sys::Win32::System::Threading::WaitForSingleObject;
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, WaitForSingleObject, THREAD_PRIORITY_BELOW_NORMAL};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 use crate::config::Boot;
 use crate::shaders::{LaunchPreparation, prepare_for_launch};
@@ -14,7 +15,15 @@ use crate::util::wide;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static SCREEN: Mutex<Option<Screen>> = Mutex::new(None);
+static BG_PROGRESS: Mutex<Option<Arc<LaunchPreparation>>> = Mutex::new(None);
+static OVERLAY: Mutex<Option<OverlayState>> = Mutex::new(None);
 const READY: u32 = WM_APP + 0x40;
+
+struct OverlayState {
+    hwnd: isize,
+    finished_at: Option<Instant>,
+    last_key: (usize, usize, bool),
+}
 
 struct Screen {
     progress: Arc<LaunchPreparation>,
@@ -33,6 +42,34 @@ impl Screen {
 pub(super) fn active() -> bool { ACTIVE.load(Ordering::Acquire) }
 
 pub(crate) fn before_guest(boot: &Boot) -> Result<(), String> {
+    let root = &boot.game_root;
+    if boot.config.graphics.eq_ignore_ascii_case("null") ||
+        (!root.join("shaders.rpf").try_exists().map_err(|e| e.to_string())? && !root.join("shaders").is_dir()) {
+        return Ok(());
+    }
+    let sync = std::env::var("XCL_SHADER_PREP_SYNC").is_ok_and(|v| v.trim() == "1");
+    if !sync {
+        std::env::remove_var("XCL_PREPARATION_PARENT");
+        std::env::remove_var("XCL_PREPARATION_MENU");
+        let progress = Arc::new(LaunchPreparation {
+            adapter: boot.config.d3d12_adapter.clone(),
+            background: true,
+            ..Default::default()
+        });
+        *BG_PROGRESS.lock().unwrap() = Some(progress.clone());
+        let root_bg = root.clone();
+        let _ = std::thread::Builder::new()
+            .name("victoryxcl-shader-prep".into())
+            .spawn(move || {
+                unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL); }
+                if let Err(e) = prepare_for_launch(&root_bg, &progress) {
+                    crate::xlog_warn!("Background shader preparation stopped: {e}");
+                } else {
+                    crate::xlog_info!("Background shader preparation complete ({} records)", progress.done.load(Ordering::Relaxed));
+                }
+            });
+        return Ok(());
+    }
     // This handle was opened by the launcher on itself, then inherited by this host.
     let parent = std::env::var("XCL_PREPARATION_PARENT").ok()
         .and_then(|s| s.parse::<usize>().ok()).filter(|&h| h != 0)
@@ -40,11 +77,6 @@ pub(crate) fn before_guest(boot: &Boot) -> Result<(), String> {
     let menu = std::env::var_os("XCL_PREPARATION_MENU").is_some();
     std::env::remove_var("XCL_PREPARATION_PARENT");
     std::env::remove_var("XCL_PREPARATION_MENU");
-    let root = &boot.game_root;
-    if boot.config.graphics.eq_ignore_ascii_case("null") ||
-        (!root.join("shaders.rpf").try_exists().map_err(|e| e.to_string())? && !root.join("shaders").is_dir()) {
-        return Ok(());
-    }
     let progress = Arc::new(LaunchPreparation { adapter: boot.config.d3d12_adapter.clone(), ..Default::default() });
     let hwnd = if super::enabled() {
         *SCREEN.lock().unwrap() = Some(Screen { progress: progress.clone(), start: Instant::now(), clock: StallClock::default(), ready: false });
@@ -192,6 +224,156 @@ impl StallClock {
 
 fn percent(done: usize, total: usize, ready: bool) -> usize {
     if ready { 100 } else { done.saturating_mul(100).checked_div(total).unwrap_or(0).min(99) }
+}
+
+unsafe extern "system" fn overlay_wndproc(hwnd: windows_sys::Win32::Foundation::HWND, msg: u32, wp: usize, lp: isize) -> isize {
+    if msg == WM_PAINT {
+        let mut ps: PAINTSTRUCT = std::mem::zeroed();
+        let dest = BeginPaint(hwnd, &mut ps);
+        let mut rc = RECT::default();
+        GetClientRect(hwnd, &mut rc);
+        if rc.right > 0 && rc.bottom > 0 {
+            let dc = CreateCompatibleDC(dest);
+            let bitmap = CreateCompatibleBitmap(dest, rc.right, rc.bottom);
+            let old = SelectObject(dc, bitmap);
+            SetBkMode(dc, TRANSPARENT as i32);
+            fill(dc, rc, 0x3C332C);
+            let inner = RECT { left: rc.left + 1, top: rc.top + 1, right: rc.right - 1, bottom: rc.bottom - 1 };
+            fill(dc, inner, 0x181512);
+            let (done, total, finished) = BG_PROGRESS
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|p| (
+                    p.done.load(Ordering::Relaxed),
+                    p.total.load(Ordering::Relaxed),
+                    p.finished.load(Ordering::Acquire),
+                ))
+                .unwrap_or((0, 0, false));
+            let pct = percent(done, total, finished);
+            let pad = 10;
+            let top_rc = RECT { left: pad, top: 6, right: rc.right - pad, bottom: 24 };
+            let label = if finished { "Shaders: 100%".into() } else { format!("Shaders: {pct}%") };
+            text(dc, top_rc, &label, 14, 600, 0xf7f5f1, DT_LEFT);
+            let count = if finished {
+                "Listo".into()
+            } else if total == 0 {
+                "Leyendo…".into()
+            } else {
+                format!("{done} / {total}")
+            };
+            text(dc, top_rc, &count, 13, 400, 0xdfd09a, DT_RIGHT);
+            let bar_w = (rc.right - pad * 2).max(1);
+            let bar = RECT { left: pad, top: rc.bottom - 12, right: rc.right - pad, bottom: rc.bottom - 7 };
+            fill(dc, bar, 0x4b4038);
+            fill(dc, RECT { right: pad + (bar_w as i64 * pct as i64 / 100) as i32, ..bar }, 0xbdb458);
+            BitBlt(dest, 0, 0, rc.right, rc.bottom, dc, 0, 0, SRCCOPY);
+            SelectObject(dc, old);
+            DeleteObject(bitmap);
+            DeleteDC(dc);
+        }
+        EndPaint(hwnd, &mut ps);
+        return 0;
+    }
+    DefWindowProcW(hwnd, msg, wp, lp)
+}
+
+pub(super) unsafe fn destroy_overlay() {
+    if let Some(ov) = OVERLAY.lock().unwrap().take() {
+        if ov.hwnd != 0 {
+            DestroyWindow(ov.hwnd as _);
+        }
+    }
+}
+
+pub(super) unsafe fn update_overlay(game_hwnd: HWND) {
+    let Some(p) = BG_PROGRESS.lock().unwrap().clone() else { return };
+    let done = p.done.load(Ordering::Relaxed);
+    let total = p.total.load(Ordering::Relaxed);
+    let finished = p.finished.load(Ordering::Acquire);
+
+    let mut ov_guard = OVERLAY.lock().unwrap();
+    if let Some(ov) = ov_guard.as_mut() {
+        if finished {
+            let first = *ov.finished_at.get_or_insert_with(Instant::now);
+            if first.elapsed() >= Duration::from_secs(3) {
+                if ov.hwnd != 0 {
+                    DestroyWindow(ov.hwnd as _);
+                }
+                *ov_guard = None;
+                return;
+            }
+        }
+    } else if finished {
+        return;
+    }
+
+    let gh = game_hwnd.0 as windows_sys::Win32::Foundation::HWND;
+    if IsIconic(gh) != 0 || IsWindowVisible(gh) == 0 {
+        if let Some(ov) = ov_guard.as_ref() {
+            if ov.hwnd != 0 {
+                ShowWindow(ov.hwnd as _, SW_HIDE);
+            }
+        }
+        return;
+    }
+
+    let mut rc = RECT::default();
+    if GetClientRect(gh, &mut rc) == 0 || rc.right < 300 || rc.bottom < 80 {
+        return;
+    }
+    let mut br = POINT { x: rc.right, y: rc.bottom };
+    ClientToScreen(gh, &mut br);
+    let w = 276;
+    let h = 42;
+    let margin = 14;
+    let x = br.x - w - margin;
+    let y = br.y - h - margin;
+
+    if ov_guard.is_none() {
+        let inst = GetModuleHandleW(std::ptr::null());
+        let class = wide("VictoryXCLShaderHud");
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(overlay_wndproc),
+            hInstance: inst,
+            lpszClassName: class.as_ptr(),
+            ..Default::default()
+        };
+        RegisterClassW(&wc);
+        let hud = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            class.as_ptr(),
+            std::ptr::null(),
+            WS_POPUP,
+            x,
+            y,
+            w,
+            h,
+            gh,
+            std::ptr::null_mut(),
+            inst,
+            std::ptr::null(),
+        );
+        if hud.is_null() {
+            return;
+        }
+        SetLayeredWindowAttributes(hud, 0, 225, LWA_ALPHA);
+        *ov_guard = Some(OverlayState {
+            hwnd: hud as isize,
+            finished_at: finished.then(Instant::now),
+            last_key: (usize::MAX, usize::MAX, false),
+        });
+    }
+
+    if let Some(ov) = ov_guard.as_mut() {
+        let hud = ov.hwnd as windows_sys::Win32::Foundation::HWND;
+        SetWindowPos(hud, HWND_TOP, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        let key = (done, total, finished);
+        if ov.last_key != key {
+            ov.last_key = key;
+            InvalidateRect(hud, std::ptr::null(), 0);
+        }
+    }
 }
 
 #[cfg(test)]

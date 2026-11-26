@@ -1718,6 +1718,8 @@ pub(crate) struct LaunchPreparation {
     pub done: AtomicUsize,
     pub total: AtomicUsize,
     pub cancel: std::sync::atomic::AtomicBool,
+    pub background: bool,
+    pub finished: std::sync::atomic::AtomicBool,
 }
 
 /// Unpacked shader containers in the title's shaders directory. Do not follow directory
@@ -1759,8 +1761,9 @@ pub(crate) fn prepare_for_launch(root: &Path, progress: &LaunchPreparation) -> R
     if windows > 1 && recomp::pso::heap_windows() { windows |= recomp::HEAP_WINDOWS; }
     for input in inputs {
         if progress.cancel.load(Ordering::Relaxed) { return Err("Shader preparation cancelled".into()); }
-        precompile(&input, usize::MAX, windows, None, None, true, None, std::time::Instant::now(), Some(progress))?;
+        precompile(&input, usize::MAX, windows, None, None, !progress.background, None, std::time::Instant::now(), Some(progress))?;
     }
+    progress.finished.store(true, Ordering::Release);
     Ok(())
 }
 
@@ -1786,9 +1789,15 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
         println!("--used-only: {} pipelines earlier runs used (used-pipelines.txt); compute programs of other pipelines are passed over", u.len());
     }
     // the compiles run on the DXC pool; these threads translate and keep it fed
-    let threads = recomp::dxc::compile_threads() + 2;
+    let bg = startup.is_some_and(|p| p.background);
+    let threads = if bg {
+        ((recomp::dxc::compile_threads() * 2) / 3).max(2)
+    } else {
+        recomp::dxc::compile_threads() + 2
+    };
     // no title runs: only a little commit is kept free besides the compiles
     if startup.is_none() { recomp::dxc::set_memory_reserve(2); }
+    else if bg { recomp::dxc::set_memory_reserve(4); }
     // VS / PS: the 32-lane form wherever the GPU can run 32-lane waves (`pso::graphics_wave32`);
     // `--split` sets both
     let startup_device = pipelines.filter(|_| startup.is_some());
@@ -1844,7 +1853,7 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
                     }
                     if crate::hle::d3d12x::real::rt_gated_compute_held(&blob) {
                         rt_gated.fetch_add(1, Ordering::Relaxed);
-                        done.fetch_add(1, Ordering::Relaxed);
+                        record_done();
                         continue;
                     }
                     let record = crate::gpu::shader::fnv64(&blob);

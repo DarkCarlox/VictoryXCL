@@ -392,11 +392,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             windows::Win32::System::Threading::ExitProcess(0);
         }
         WM_DESTROY => {
+            preparation::destroy_overlay();
             PostQuitMessage(0);
             LRESULT(0)
         }
+        WM_MOVE | WM_SIZE | WM_SHOWWINDOW => {
+            preparation::update_overlay(hwnd);
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
         WM_TIMER if wp.0 == COMPILE_TIMER => {
             show_compiling(hwnd);
+            preparation::update_overlay(hwnd);
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
