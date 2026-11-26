@@ -2349,6 +2349,10 @@ impl Em {
     }
 
     fn export_graphics(&mut self, d: &Decoded, en: u64, tgt: u64, compr: bool, srcs: &[String]) -> Result<(), &'static str> {
+        fn nan_guard_enabled() -> bool {
+            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *ON.get_or_init(|| std::env::var("XCL_NAN_GUARD").map_or(true, |v| v.trim() != "0"))
+        }
         let act = self.act();
         let done = rdna2::field_value(d.enc, &d.words, "DONE") == Some(1);
         let vm = rdna2::field_value(d.enc, &d.words, "VM") == Some(1);
@@ -2406,6 +2410,11 @@ impl Em {
                             (2, true) => format!("(((int)({raw} << 16)) >> 16)"),
                             (2, false) => format!("(int){raw}"),
                             (_, _) => raw,
+                        };
+                        let v = if e.component_type == 3 && nan_guard_enabled() {
+                            format!("xcl_nan_guard({v})")
+                        } else {
+                            v
                         };
                         st.push(format!("xo.t{tgt}[{c}] = {v};"));
                     }
@@ -6579,6 +6588,7 @@ uint lerp_u8(uint a, uint b, uint c) { return lerp8(a, b, c, 0u) | lerp8(a, b, c
 uint sat_u32(uint64_t r) { return select(r > (uint64_t)0xFFFFFFFFu, 0xFFFFFFFFu, (uint)r); }
 uint sat_i32(int64_t r) { return select(r > (int64_t)0x7FFFFFFF, 0x7FFFFFFFu, select(r < -(int64_t)0x80000000u, 0x80000000u, (uint)r)); }
 float div_fixup(float q, float d, float n) { return select(or(or(isnan(d), isnan(n)), or(d == 0.0f, or(isinf(d), isinf(n)))), n / d, q); }
+float xcl_nan_guard(float x) { uint b = asuint(x); uint a = b & 0x7FFFFFFFu; return select(a > 0x7F800000u, 0.0f, select(a == 0x7F800000u, asfloat((b & 0x80000000u) | 0x477FE000u), x)); }
 float fma_legacy(float a, float b, float c) { return (a == 0.0f || b == 0.0f) ? c : mad(a, b, c); }
 float mad_nf(float a, float b, float c) { precise float p = a * b; precise float r = p + c; return r; }
 // IEEE-754 binary32 -> binary16 under RDNA2 MODE[3:2]: 0 = RNE, 1 = +inf, 2 = -inf, 3 = RTZ.

@@ -13,6 +13,10 @@ path = "src/lib.rs"
 name = "xcl"
 path = "src/main.rs"
 
+[[bin]]
+name = "VictoryXCL"
+path = "src/main.rs"
+
 [dependencies]
 miniz_oxide = { version = "0.9", features = ["simd"] }
 retour = "0.3"

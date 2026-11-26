@@ -74,7 +74,7 @@ pub(crate) fn before_guest(boot: &Boot) -> Result<(), String> {
             }
         } else if let Err(e) = &result {
             if menu && !progress.cancel.load(Ordering::Relaxed) {
-                unsafe { MessageBoxW(hwnd.0, wide(e).as_ptr(), wide("XCL – Shader preparation failed").as_ptr(), MB_OK | MB_ICONERROR); }
+                unsafe { MessageBoxW(hwnd.0, wide(e).as_ptr(), wide("VictoryXCL – Shader preparation failed").as_ptr(), MB_OK | MB_ICONERROR); }
             }
         }
         ACTIVE.store(false, Ordering::Release);

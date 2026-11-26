@@ -470,7 +470,7 @@ unsafe fn show_compiling(hwnd: HWND) {
         }
         last.is_some_and(|t| t.elapsed() < Duration::from_secs(2))
     };
-    let title = format!("XCL – {} | {fps:.1} FPS", window_name());
+    let title = format!("VictoryXCL – {} | {fps:.1} FPS", window_name());
     let text = if recent {
         let queued = if queued > 0 { format!(", {queued} pipelines queued") } else { String::new() };
         let failed = if failed > 0 { format!(", {failed} failed") } else { String::new() };
@@ -506,7 +506,7 @@ fn window_thread() {
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             class,
-            &HSTRING::from(format!("XCL – {title}")),
+            &HSTRING::from(format!("VictoryXCL – {title}")),
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             x,
             y,

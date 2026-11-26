@@ -18,7 +18,7 @@ unsafe extern "system" fn xcl_tls_callback(_h: *mut c_void, reason: u32, _r: *mu
 static XCL_TLS_CALLBACK: unsafe extern "system" fn(*mut c_void, u32, *mut c_void) = xcl_tls_callback;
 
 const HELP: &str = "\
-XCL – Xbox Series X|S → Windows compatibility layer
+VictoryXCL – Xbox Series X|S → Windows compatibility layer (VIctory + XCL)
 
 Usage:
   xcl run <game folder | file.exe> [-- game arguments]
@@ -247,7 +247,7 @@ fn pick_game_file() -> Option<PathBuf> {
     let f = unsafe { system_proc("comdlg32.dll", "GetOpenFileNameW") }?;
     // pairs of (description, pattern), each ending in NUL, the list in one more
     let filter: Vec<u16> = "Xbox game (*.exe, MicrosoftGame.config)\0*.exe;MicrosoftGame.config\0All files\0*.*\0\0".encode_utf16().collect();
-    let title = wide("XCL – choose a game");
+    let title = wide("VictoryXCL – choose a game");
     let mut file = vec![0u16; 32768];
     let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
     ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
