@@ -221,7 +221,8 @@ pub struct Plan {
 }
 
 /// Most 32-bit words of tables a program may need to take the form by itself.
-const MAX_TABLE_WORDS: usize = 32768;
+pub const MAX_TABLE_WORDS: usize = 32768;
+pub const TABLE_WORDS_WAVE32: usize = 12288;
 
 impl Plan {
     /// Bits of a table entry: the class, and the taken successor or the index of the pair of offsets.
@@ -262,7 +263,28 @@ const LARGE_INSTS: usize = 10_000;
 /// in plain form, causing excessive driver-compiler memory commit spikes.
 const LARGE_BLOCKS: usize = 2_000;
 
-/// Whether a program is large enough for `wanted` to be asked.
+/// A consumed atomic result prevents cutting a dispatch into independent pipelines.
+/// Consider a compact whole pipeline for branch-heavy split-wave compute shaders instead.
+pub(super) fn atomic_candidate(cfg: &Cfg) -> bool {
+    cfg.rpo.len() >= 250 && cfg.rpo.iter().flat_map(|&b| &cfg.blocks[b].insts).any(|&i| {
+        let d = &cfg.insts[i];
+        d.inst.name == "BUFFER_ATOMIC_ADD" && crate::gpu::rdna2::field_value(d.enc, &d.words, "GLC") == Some(1)
+    })
+}
+
+pub fn automatic_plan(cfg: &Cfg, lw: &Lw, split_compute: bool, tables: usize) -> Option<Plan> {
+    let large = large(cfg);
+    if !large && !(split_compute && atomic_candidate(cfg)) { return None; }
+    let p = plan(cfg, lw)?;
+    if p.words() > tables { return None; }
+    let insts = |n: usize| cfg.blocks[p.order[n]].insts.len();
+    let all: usize = (0..p.order.len()).map(insts).sum();
+    let once: usize = p.rep.iter().map(|&n| insts(n)).sum();
+    let repeated = if large { once * 10 < all * 3 } else { p.rep.len() * 4 <= p.order.len() };
+    repeated.then_some(p)
+}
+
+/// Whether to consider compaction based on instruction count alone.
 pub fn large(cfg: &Cfg) -> bool {
     cfg.rpo.len() >= LARGE_BLOCKS
         || cfg.rpo.iter().map(|&b| cfg.blocks[b].insts.len()).sum::<usize>() >= LARGE_INSTS

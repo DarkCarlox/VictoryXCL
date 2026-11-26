@@ -99,6 +99,7 @@ impl Module {
         match op {
             Op::Bin(..) | Op::Cast(..) | Op::Cmp(..) | Op::Select(..) | Op::Extract(..) | Op::Gep(..) => Cse::Dom,
             Op::Load(p, _) if self.is_const_global_ptr(*p) => Cse::Dom,
+            Op::Phi(_) if cfg!(test) && std::env::var_os("XCL_SAMPLE_PHI_CSE").is_some() => Cse::Block,
             Op::Call(f, _) if self.funcs[*f as usize].attrs == FnAttrs::ReadNone => {
                 let name = &self.funcs[*f as usize].name;
                 // AMD RDNA4 (`amdxc64.dll`) crashes on null deref if a raw `createHandleFromHeap`

@@ -90,7 +90,7 @@ impl PipelineBuilder {
             crate::xlog_info!("compute split: .plib miss #{misses} for cs {:016x} ({lib_key})", self.record);
         }
         let (hr, _, _) = compute_container(self.device.as_raw(), self.create, &desc, self.signature.as_raw(),
-            dxil, self.record, iid, &mut raw, true);
+            dxil, self.record, iid, &mut raw, ComputeBuild::Chain);
         if hr >= 0 && !raw.is_null() {
             pso_lib::store_pipeline(self.device.as_raw(), &lib_key, raw);
             Ok(ID3D12PipelineState::from_raw(raw))
