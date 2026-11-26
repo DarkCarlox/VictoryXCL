@@ -1803,6 +1803,76 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
     let startup_device = pipelines.filter(|_| startup.is_some());
     let graphics_split = split.unwrap_or_else(|| startup_device.map_or_else(recomp::runner::graphics_wave32, |p| recomp::pso::graphics_wave32_for_device(&p.dev)));
     let split = split.unwrap_or_else(|| startup_device.map_or_else(|| recomp::pso::split_wave64_forced() || recomp::runner::wave64_supported().is_ok_and(|w| !w), |p| recomp::pso::wave32_only_for_device(&p.dev)));
+    struct PreparedBitset {
+        path: PathBuf,
+        sig: u64,
+        bytes: Vec<std::sync::atomic::AtomicU8>,
+        save_lock: Mutex<()>,
+    }
+    impl PreparedBitset {
+        fn load_or_new(n: usize, sig: u64) -> Self {
+            let path = recomp::dxc::cache_dir().join("prepared-records-v1.bin");
+            let byte_len = n.div_ceil(8);
+            let mut raw = vec![0u8; byte_len];
+            if let Ok(data) = std::fs::read(&path) {
+                if data.len() == 8 + byte_len && data[..8] == sig.to_le_bytes() {
+                    raw.copy_from_slice(&data[8..]);
+                }
+            }
+            let bytes = raw.into_iter().map(std::sync::atomic::AtomicU8::new).collect();
+            Self { path, sig, bytes, save_lock: Mutex::new(()) }
+        }
+        fn is_done(&self, i: usize) -> bool {
+            (self.bytes[i / 8].load(Ordering::Relaxed) & (1u8 << (i % 8))) != 0
+        }
+        fn mark_done(&self, i: usize) {
+            self.bytes[i / 8].fetch_or(1u8 << (i % 8), Ordering::Relaxed);
+        }
+        fn count_done(&self, n: usize) -> usize {
+            (0..n).filter(|&i| self.is_done(i)).count()
+        }
+        fn save(&self) {
+            let Ok(_g) = self.save_lock.try_lock() else { return };
+            if let Some(parent) = self.path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let mut out = Vec::with_capacity(8 + self.bytes.len());
+            out.extend_from_slice(&self.sig.to_le_bytes());
+            for b in &self.bytes {
+                out.push(b.load(Ordering::Relaxed));
+            }
+            let tmp = self.path.with_extension("bin.tmp");
+            if std::fs::write(&tmp, &out).is_ok() {
+                let _ = std::fs::rename(&tmp, &self.path);
+            }
+        }
+    }
+    let persist = (startup.is_some() && limit == usize::MAX && only.is_none() && used.is_none()).then(|| {
+        let sig = crate::gpu::shader::fnv64(format!("{n}:{windows}:{split}:{graphics_split}:v1").as_bytes());
+        PreparedBitset::load_or_new(n, sig)
+    });
+    if let Some(ps) = &persist {
+        let already = ps.count_done(n);
+        if already > 0 {
+            done.fetch_add(already, Ordering::Relaxed);
+            if let Some(p) = startup { p.done.fetch_add(already, Ordering::Relaxed); }
+            crate::xlog_info!("Shader preparation: skipping {already}/{n} already-prepared records from cache");
+        }
+        if already >= n {
+            return Ok(());
+        }
+    }
+    if bg {
+        while !startup.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) {
+            let elapsed = t0.elapsed();
+            if elapsed >= std::time::Duration::from_secs(12)
+                || (elapsed >= std::time::Duration::from_secs(4) && crate::hle::d3d12x::present::presents() >= 30)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
     println!(
         "precompiling {n} shaders into {} ({} compile threads; {} memory windows{}{})",
         recomp::dxc::cache_dir().display(),
@@ -1817,17 +1887,30 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
         for _ in 0..threads {
             s.spawn(|| loop {
                 if startup.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) { break; }
-                while bg && !startup.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) && crate::hle::d3d12x::pso_async::should_yield_background() {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 if i >= n {
                     break;
                 }
+                if persist.as_ref().is_some_and(|ps| ps.is_done(i)) {
+                    continue;
+                }
+                while bg && !startup.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) && crate::hle::d3d12x::pso_async::should_yield_background() {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
                 let record_done = || {
+                    if let Some(ps) = &persist {
+                        ps.mark_done(i);
+                    }
                     let d = done.fetch_add(1, Ordering::Relaxed) + 1;
                     if let Some(p) = startup { p.done.fetch_add(1, Ordering::Relaxed); }
-                    if d % 200 == 0 { eprintln!("  {d}/{n} ({:.0} s)", t0.elapsed().as_secs_f64()); }
+                    if d % 50 == 0 {
+                        if let Some(ps) = &persist {
+                            ps.save();
+                        }
+                    }
+                    if d % 200 == 0 {
+                        eprintln!("  {d}/{n} ({:.0} s)", t0.elapsed().as_secs_f64());
+                    }
                 };
                 let (name, blob) = input.get(i);
                 let Some(blob) = blob else {
@@ -1933,6 +2016,9 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
             });
         }
     });
+    if let Some(ps) = &persist {
+        ps.save();
+    }
     let failed = failed.into_inner();
     let skipped_reason = if startup.is_some() { "runtime pairing or unsupported translation" } else { "GS – paired at pipeline creation" };
     println!(

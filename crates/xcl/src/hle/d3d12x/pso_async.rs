@@ -488,9 +488,9 @@ fn enqueue(p: Arc<Pending>) {
 /// Physical RAM & commit headroom thresholds (`min(ullAvailPhys, ullAvailPageFile)`) for
 /// throttling background PSO compilation well before Windows starts paging out the title
 /// (`XCL_PSO_MEM_THROTTLE=0`: off).
-const PRELOAD_PAUSE_COMMIT: u64 = 6 << 30;
-const WORKER_CAP_2_COMMIT: u64 = 5 << 30;
-const WORKER_CAP_1_COMMIT: u64 = 3 << 30;
+const PRELOAD_PAUSE_COMMIT: u64 = 2560 << 20;
+const WORKER_CAP_2_COMMIT: u64 = 2048 << 20;
+const WORKER_CAP_1_COMMIT: u64 = 1024 << 20;
 
 fn mem_throttle_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
@@ -2543,6 +2543,7 @@ static FRAME_WAIT: Mutex<FrameWaitBudget> = Mutex::new(FrameWaitBudget::new());
 /// without ever freezing `PresentX`. Nobody marks the build `wanted`, so cold big compiles stay
 /// strictly behind critical work and commit headroom.
 fn resolve_spared(p: &Arc<Pending>, pso: usize) -> usize {
+    p.note_use();
     match p.real.load(Ordering::Acquire) {
         0 => {
             if p.bvh_traversal.load(Ordering::Acquire) && !super::real::bvh_traversal_allowed() {
@@ -2770,9 +2771,9 @@ mod pso_queue_tests {
 
     #[test]
     fn commit_headroom_throttles_workers_and_pauses_preload() {
-        assert_eq!(PRELOAD_PAUSE_COMMIT, 6 << 30);
-        assert_eq!(WORKER_CAP_2_COMMIT, 5 << 30);
-        assert_eq!(WORKER_CAP_1_COMMIT, 3 << 30);
+        assert_eq!(PRELOAD_PAUSE_COMMIT, 2560 << 20);
+        assert_eq!(WORKER_CAP_2_COMMIT, 2048 << 20);
+        assert_eq!(WORKER_CAP_1_COMMIT, 1024 << 20);
 
         assert_eq!(worker_cap_for_commit(None, 6), 6);
         assert_eq!(worker_cap_for_commit(Some(7 << 30), 6), 6);

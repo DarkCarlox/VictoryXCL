@@ -386,6 +386,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     match msg {
         WM_CLOSE => {
             crate::xlog_info!("XCL window closed – ending the game process");
+            preparation::stop_background();
+            super::pso_async::flush_used_bounded(std::time::Duration::from_millis(500));
             super::real::flush_pipeline_library();
             crate::report::write_final(None);
             crate::log::flush();

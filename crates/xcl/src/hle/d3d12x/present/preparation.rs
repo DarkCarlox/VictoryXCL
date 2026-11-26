@@ -286,6 +286,12 @@ pub(super) unsafe fn destroy_overlay() {
     }
 }
 
+pub(super) fn stop_background() {
+    if let Some(p) = BG_PROGRESS.lock().unwrap().as_ref() {
+        p.cancel.store(true, Ordering::Release);
+    }
+}
+
 pub(super) unsafe fn update_overlay(game_hwnd: HWND) {
     let Some(p) = BG_PROGRESS.lock().unwrap().clone() else { return };
     let done = p.done.load(Ordering::Relaxed);

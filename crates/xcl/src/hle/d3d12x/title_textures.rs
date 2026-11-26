@@ -921,8 +921,8 @@ unsafe fn refresh_once(queue: *mut c_void) {
         dirty.clear();
         WATCH_BUF.with(|wcell| {
             let mut buf = wcell.borrow_mut();
-            if buf.len() < 16384 {
-                buf.resize(16384, std::ptr::null_mut());
+            if buf.len() < 65536 {
+                buf.resize(65536, std::ptr::null_mut());
             }
             super::list_x::mirror_look_begin();
             for &(base, size) in ranges.iter() {
@@ -1749,17 +1749,30 @@ unsafe fn upload_queue(dev: &ID3D12Device, device: usize) -> Result<ID3D12Comman
 /// retail game's intro video had its submitting thread at 42 % in GetWriteWatch with a 1 MiB gap
 /// (thousands of calls before each submit over its mapped sparse tiles). The pages of a gap are
 /// reported as written too; the uploads keep to what they track.
-const WATCH_GAP: usize = 64 << 20;
+fn watch_gap() -> usize {
+    if cfg!(test) {
+        return 64 << 20;
+    }
+    static GAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *GAP.get_or_init(|| {
+        std::env::var("XCL_WATCH_GAP_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(2)
+            .saturating_mul(1 << 20)
+    })
+}
 
 /// The parts of `wanted` (start, end) inside `regions` (base, size), merged (gaps under
-/// `WATCH_GAP` too) and sorted, as (base, size) – each within one region (a write-watch call
+/// `watch_gap()` too) and sorted, as (base, size) – each within one region (a write-watch call
 /// covers one allocation).
 fn watch_ranges(regions: &[(usize, usize)], mut wanted: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    let gap = watch_gap();
     wanted.sort_unstable();
     let mut merged: Vec<(usize, usize)> = Vec::new();
     for (a, b) in wanted {
         match merged.last_mut() {
-            Some(last) if a <= last.1.saturating_add(WATCH_GAP) => last.1 = last.1.max(b),
+            Some(last) if a <= last.1.saturating_add(gap) => last.1 = last.1.max(b),
             _ => merged.push((a, b)),
         }
     }
