@@ -1791,7 +1791,7 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
     // the compiles run on the DXC pool; these threads translate and keep it fed
     let bg = startup.is_some_and(|p| p.background);
     let threads = if bg {
-        ((recomp::dxc::compile_threads() * 2) / 3).max(2)
+        (recomp::dxc::compile_threads() / 3).clamp(1, 2)
     } else {
         recomp::dxc::compile_threads() + 2
     };
@@ -1817,6 +1817,9 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
         for _ in 0..threads {
             s.spawn(|| loop {
                 if startup.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) { break; }
+                while bg && !startup.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) && crate::hle::d3d12x::pso_async::should_yield_background() {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 if i >= n {
                     break;

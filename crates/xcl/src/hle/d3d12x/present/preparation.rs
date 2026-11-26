@@ -322,13 +322,13 @@ pub(super) unsafe fn update_overlay(game_hwnd: HWND) {
     if GetClientRect(gh, &mut rc) == 0 || rc.right < 300 || rc.bottom < 80 {
         return;
     }
-    let mut br = POINT { x: rc.right, y: rc.bottom };
-    ClientToScreen(gh, &mut br);
+    let mut tr = POINT { x: rc.right, y: rc.top };
+    ClientToScreen(gh, &mut tr);
     let w = 276;
     let h = 42;
     let margin = 14;
-    let x = br.x - w - margin;
-    let y = br.y - h - margin;
+    let x = tr.x - w - margin;
+    let y = tr.y + margin;
 
     if ov_guard.is_none() {
         let inst = GetModuleHandleW(std::ptr::null());

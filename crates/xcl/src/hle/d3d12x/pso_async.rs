@@ -32,6 +32,15 @@ fn wanted_active() -> usize {
     WANTED_ACTIVE_COUNT.load(Ordering::Acquire)
 }
 
+/// True when active `wanted` pipelines or low free commit (< 6 GiB) should pause background shader prep.
+pub(crate) fn should_yield_background() -> bool {
+    if wanted_active() > 0 {
+        return true;
+    }
+    let avail = mem_throttle_enabled().then(avail_commit_bytes).flatten();
+    should_pause_preload(avail)
+}
+
 struct Pending {
     /// the build, until a worker – or a bind that cannot wait for the queue – takes it
     job: Mutex<Option<Job>>,
