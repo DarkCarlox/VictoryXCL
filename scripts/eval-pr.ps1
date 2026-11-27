@@ -85,8 +85,14 @@ $highRiskPaths = @(
     '\.(ps1|bat|cmd|py|sh|vbs|js|exe|dll|pdb|bin|rpf)$'
 )
 
+$allowedScopeRoots = '^(crates/|tests/|docs/|README\.md$|TASKS\.(md|json)$|LEADERBOARD\.md$)'
+
 $flaggedPaths = @()
+$offTopicPaths = @()
 foreach ($f in $changedFiles) {
+    if ($f -notmatch $allowedScopeRoots) {
+        $offTopicPaths += $f
+    }
     foreach ($pat in $highRiskPaths) {
         if ($f -match $pat) {
             $flaggedPaths += $f
@@ -96,12 +102,13 @@ foreach ($f in $changedFiles) {
 }
 
 $dangerPatterns = @(
-    @{ Name = 'Process/Shell Spawn'; Regex = 'std::process::Command|Command::new|ShellExecute|CreateProcess|WinExec|powershell|cmd\.exe|wscript|mshta|rundll32' },
-    @{ Name = 'Network/HTTP';        Regex = 'std::net::|TcpStream|UdpSocket|TcpListener|reqwest|ureq|hyper|WinHttp|wininet|WSAStartup' },
+    @{ Name = 'Process/Shell Spawn';   Regex = 'std::process::Command|Command::new|ShellExecute|CreateProcess|WinExec|powershell|cmd\.exe|wscript|mshta|rundll32|iex\s|EncodedCommand' },
+    @{ Name = 'Network/Download';      Regex = 'std::net::|TcpStream|UdpSocket|TcpListener|reqwest|ureq|hyper|WinHttp|wininet|WSAStartup|Invoke-WebRequest|Invoke-RestMethod|curl\.exe|wget\s' },
     @{ Name = 'Memory/Hook Injection'; Regex = 'CreateRemoteThread|WriteProcessMemory|VirtualAllocEx|SetWindowsHookEx|NtUnmapViewOfSection' },
-    @{ Name = 'Persistence/Registry'; Regex = 'RegSetValue|RegCreateKey|CurrentVersion\\Run|schtasks' },
-    @{ Name = 'Obfuscation/Blob';    Regex = 'include_bytes!\(|from_base64|base64::decode' },
-    @{ Name = 'Slop/Test Bypass';    Regex = '#\[ignore\]|XCL_NETWORK\s*=\s*1' }
+    @{ Name = 'Persistence/Registry';  Regex = 'RegSetValue|RegCreateKey|CurrentVersion\\Run|schtasks' },
+    @{ Name = 'Obfuscation/Blob';      Regex = 'include_bytes!\(|from_base64|base64::decode|FromBase64String' },
+    @{ Name = 'Prompt Injection';      Regex = 'ignore (all )?previous instructions|disregard (all )?(above|prior)|system prompt|developer mode|jailbreak|auto[- ]?approve|skip security' },
+    @{ Name = 'Slop/Test Bypass';      Regex = '#\[ignore\]|XCL_NETWORK\s*=\s*1' }
 )
 
 $diffLines = @(git -C $RepoRoot diff --unified=0 $diffRange)
@@ -128,6 +135,10 @@ foreach ($line in $diffLines) {
 }
 
 Write-Host ""
+if ($offTopicPaths.Count -gt 0) {
+    Write-Host "[SCOPE WARNING] Files outside VictoryXCL core scope (crates/, tests/, docs/, README/TASKS/LEADERBOARD):" -ForegroundColor Yellow
+    $offTopicPaths | Sort-Object -Unique | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
+}
 if ($flaggedPaths.Count -gt 0) {
     Write-Host "[SECURITY WARNING] High-risk paths modified:" -ForegroundColor Yellow
     $flaggedPaths | Sort-Object -Unique | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
@@ -136,8 +147,8 @@ if ($flaggedCode.Count -gt 0) {
     Write-Host "[SECURITY WARNING] Suspicious added patterns detected:" -ForegroundColor Red
     $flaggedCode | ForEach-Object { Write-Host "  [$($_.Rule)] $($_.File): $($_.Line)" -ForegroundColor Red }
 }
-if ($flaggedPaths.Count -eq 0 -and $flaggedCode.Count -eq 0) {
-    Write-Host "[Phase 1] Automated scan found 0 blocklisted paths and 0 dangerous added patterns." -ForegroundColor Green
+if ($offTopicPaths.Count -eq 0 -and $flaggedPaths.Count -eq 0 -and $flaggedCode.Count -eq 0) {
+    Write-Host "[Phase 1] Automated scan found 0 off-topic paths, 0 blocklisted paths, and 0 dangerous added patterns." -ForegroundColor Green
 }
 
 if (-not $SecurityApproved) {
