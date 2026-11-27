@@ -1,6 +1,7 @@
 {
   "project": "VictoryXCL",
   "repo": "CarlosB456/VictoryXCL",
+  "goal": "Stable, playable 30 FPS gameplay with zero visual/graphical bugs, fast shader compilation, and eliminated CPU/GPU/RAM/HDD/NVMe bottlenecks.",
   "target_hardware": {
     "gpu": "AMD Radeon RX 6600 (8 GB VRAM, RDNA2)",
     "ram": "16 GB DDR4",
@@ -18,6 +19,7 @@
   "tasks": [
     {
       "id": "perf-write-watch-stretch",
+      "category": "CPU / RAM",
       "title": "Reduce GetWriteWatch overhead via in-place GPU-view stretch mapping",
       "level": "hard",
       "points": 100,
@@ -31,7 +33,94 @@
       "acceptance": "Lower write-watch ms and lock wait ms in timed smoke run while maintaining 0 crashes and >= baseline FPS."
     },
     {
+      "id": "perf-bitcode-cleanup",
+      "category": "Shader Compiler / CPU / RAM",
+      "title": "Add dead-code and algebraic clean-up passes over translated shaders before DXC",
+      "level": "hard",
+      "points": 90,
+      "status": "open",
+      "target_files": [
+        "crates/xcl/src/gpu/recomp/"
+      ],
+      "problem": "Large shaders trigger heavy DXC and AMD driver PSO compile spikes (xcl-dxc-* and amdxc64.dll) that dip FPS from 30.0 to 7-15 fps and pressure 16 GB system commit.",
+      "acceptance": "Pass all recomp/shader unit tests, reduce emitted DXIL/HLSL size and DXC/driver compile time without changing shader semantics."
+    },
+    {
+      "id": "perf-shader-prep-cache",
+      "category": "Shader Compiler / Stutter",
+      "title": "Speed up background shader/PSO preparation and disk cache hit rate to eliminate menu/cutscene stalls",
+      "level": "hard",
+      "points": 85,
+      "status": "open",
+      "target_files": [
+        "crates/xcl/src/shaders.rs",
+        "crates/xcl/src/hle/d3d12x/pso_async.rs",
+        "crates/xcl/src/hle/d3d12x/real.rs"
+      ],
+      "problem": "Intro/menu frames can drop to 6.9 fps while cold PSOs compile and stand-in pipelines cause pop-in.",
+      "acceptance": "Faster shader prep throughput, higher warm cache hit rate, zero frame stalls or stand-in regressions."
+    },
+    {
+      "id": "perf-nvme-hdd-streaming",
+      "category": "HDD / NVMe / DirectStorage",
+      "title": "Optimize DirectStorage I/O batching and parallel zlib/BCPack decompression to prevent open-world streaming hitches",
+      "level": "hard",
+      "points": 80,
+      "status": "open",
+      "target_files": [
+        "crates/xcl/src/hle/d3dstorage.rs",
+        "crates/xcl/src/hle/d3d12x/title_textures.rs"
+      ],
+      "problem": "Open-world bursts generate 65,536+ DirectStorage requests and 16,384+ deferred page-list writes, causing CPU/disk contention and FPS dips.",
+      "acceptance": "Reduce streaming hitching and CPU overhead on HDD/NVMe without corrupting destinations or leaking memory."
+    },
+    {
+      "id": "perf-gpu-descriptor-lock",
+      "category": "GPU / CPU Frame Time",
+      "title": "Reduce per-draw allocations and lock contention in descriptor/view binding and command list recording",
+      "level": "solid",
+      "points": 75,
+      "status": "open",
+      "target_files": [
+        "crates/xcl/src/hle/d3d12x/bind.rs",
+        "crates/xcl/src/hle/d3d12x/console_heap.rs",
+        "crates/xcl/src/hle/d3d12x/list_x.rs"
+      ],
+      "problem": "High draw-count scenes suffer CPU recording overhead from descriptor lookups, root-constant staging copies, and mutex contention.",
+      "acceptance": "Measurable reduction in frame time / higher average FPS with all unit tests passing."
+    },
+    {
+      "id": "perf-resubmit-wait",
+      "category": "GPU / Sync",
+      "title": "Eliminate command-list resubmit GPU stalls by rotating PC command lists/allocators",
+      "level": "solid",
+      "points": 65,
+      "status": "open",
+      "target_files": [
+        "crates/xcl/src/hle/d3d12x/alloc_pool.rs",
+        "crates/xcl/src/hle/d3d12x/real.rs"
+      ],
+      "problem": "xcl.log logs #256-#512 occurrences of 'a command list is submitted while its previous submit is still on the GPU' causing submit waits up to 2.6 ms.",
+      "acceptance": "Reduce or eliminate resubmit waits cleanly without triggering D3D12 debug layer ID 553 or device removal."
+    },
+    {
+      "id": "visual-flicker-nan-audit",
+      "category": "Visual Bugs / Flicker / Flashes",
+      "title": "Eliminate visual flickering, bright flashes, and NaN/Inf propagation in compute/mesh/post-process passes",
+      "level": "hard",
+      "points": 85,
+      "status": "open",
+      "target_files": [
+        "crates/xcl/src/gpu/recomp/emit.rs",
+        "crates/xcl/src/hle/d3d12x/ambient.rs",
+        "crates/xcl/src/hle/d3d12x/standin.rs"
+      ],
+      "problem": "Pixel exports have xcl_nan_guard, but compute UAV/RWTexture stores, sky/reflection buffers, and stand-in swaps can still produce flashes or flicker.",
+      "acceptance": "Eliminate NaN/Inf/flash sources without breaking valid HDR rendering; verified with unit/shader tests and live visuals."
+    },
+    {
       "id": "perf-retire-copies",
+      "category": "Visual Bugs / GPU Safety",
       "title": "Retire replaced buffer/texture copies via GPU fences instead of immediate Drop",
       "level": "solid",
       "points": 60,
@@ -45,45 +134,38 @@
       "acceptance": "Retire superseded copies behind queue fences with unit tests proving deferred release until fence completion."
     },
     {
-      "id": "perf-bitcode-cleanup",
-      "title": "Add safe dead-code and algebraic clean-up passes over translated shaders before DXC",
-      "level": "hard",
-      "points": 80,
-      "status": "open",
-      "target_files": [
-        "crates/xcl/src/gpu/recomp/"
-      ],
-      "problem": "Large shaders trigger heavy DXC and AMD driver PSO compile spikes (xcl-dxc-* and amdxc64.dll) that dip FPS from 30.0 to 7-15 fps and pressure 16 GB system commit.",
-      "acceptance": "Pass all recomp/shader unit tests, reduce emitted DXIL/HLSL size and compile time without changing shader semantics."
-    },
-    {
-      "id": "perf-resubmit-wait",
-      "title": "Eliminate command-list resubmit GPU stalls by rotating PC command lists/allocators",
+      "id": "perf-commit-vram-budget",
+      "category": "RAM 16GB / VRAM 8GB",
+      "title": "Tighten staging, upload ring, and heap commit reuse to eliminate low-commit thrashing on 16 GB RAM",
       "level": "solid",
-      "points": 65,
+      "points": 60,
       "status": "open",
       "target_files": [
-        "crates/xcl/src/hle/d3d12x/alloc_pool.rs",
-        "crates/xcl/src/hle/d3d12x/real.rs"
+        "crates/xcl/src/gpu/texture.rs",
+        "crates/xcl/src/hle/d3d12x/vram.rs",
+        "crates/xcl/src/hle/d3d12x/sparse.rs"
       ],
-      "problem": "xcl.log logs #256-#512 occurrences of 'a command list is submitted while its previous submit is still on the GPU' causing submit waits up to 2.6 ms.",
-      "acceptance": "Reduce or eliminate resubmit waits cleanly without triggering D3D12 debug layer ID 553 or device removal."
+      "problem": "xcl.log repeatedly releases idle staging buffers under low commit (< 4 GiB free) during heavy world streaming.",
+      "acceptance": "Lower peak commit and reduce staging buffer churn without causing OOM or texture corruption."
     },
     {
       "id": "compat-cmdlist10-slot101",
-      "title": "Investigate and implement ID3D12GraphicsCommandList10::#101 and CopyMemoryToMemoryX non-UMA path",
+      "category": "Compatibility / Missing Visuals",
+      "title": "Implement ID3D12GraphicsCommandList10::#101, CopyMemoryToMemoryX non-UMA path, and unaligned UAVs",
       "level": "solid",
-      "points": 50,
+      "points": 55,
       "status": "open",
       "target_files": [
         "crates/xcl/src/hle/d3d12x/list_x.rs",
-        "crates/xcl/src/hle/d3d12x/real.rs"
+        "crates/xcl/src/hle/d3d12x/real.rs",
+        "crates/xcl/src/hle/d3d12x/console_heap.rs"
       ],
-      "problem": "xcl.log reports first stub call '[STUB] d3d12_xs.dll!ID3D12GraphicsCommandList10::#101 (not on PC)' and skipped CopyMemoryToMemoryX calls outside UMA.",
-      "acceptance": "Properly handle or verify the slot/copy semantics with unit tests and 0 regressions."
+      "problem": "xcl.log reports [STUB] ID3D12GraphicsCommandList10::#101, skipped CopyMemoryToMemoryX outside UMA, and unaligned placed buffer UAVs binding null views.",
+      "acceptance": "Handle slot/copy/UAV edge cases properly with unit tests and 0 regressions."
     },
     {
       "id": "perf-texture-min-lod",
+      "category": "VRAM 8GB / RAM 16GB",
       "title": "Support optional ResourceMinLODClamp on placed texture views for 8 GB VRAM GPUs",
       "level": "warmup",
       "points": 35,
@@ -93,7 +175,7 @@
         "crates/xcl/src/hle/d3d12x/vram.rs"
       ],
       "problem": "Streaming 32,768+ placed textures strains 8 GB VRAM and 16 GB RAM commit; a configurable MinLOD clamp env var reduces memory spikes.",
-      "acceptance": "Configurable env flag (off or safe default) with unit tests verifying SRV MinLODClamp handling."
+      "acceptance": "Configurable env flag with unit tests verifying SRV MinLODClamp handling."
     }
   ]
 }
