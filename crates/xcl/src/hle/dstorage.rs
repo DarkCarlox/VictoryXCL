@@ -1043,9 +1043,48 @@ enum Entry {
     Gate(Arc<std::sync::Barrier>),
 }
 
+impl Entry {
+    fn has_deferred_destination(&self) -> bool {
+        matches!(self, Self::Request { dest_pages: Some(_), dest_on_stack: false, .. })
+    }
+}
+
+#[derive(Default)]
 struct Pending {
     entries: Vec<Entry>,
     next_seq: u64,
+    deferred_destinations: usize,
+}
+
+impl Pending {
+    fn push(&mut self, entry: Entry, capacity: usize) -> bool {
+        self.deferred_destinations += usize::from(entry.has_deferred_destination());
+        self.entries.push(entry);
+        // Heap-backed DestinationPageArray requests may still be populated by the title.
+        // Leave them pending until explicit Submit() or until the queue fills.
+        let limit = if self.deferred_destinations != 0 {
+            capacity
+        } else {
+            (capacity / 2).max(1)
+        };
+        self.entries.len() >= limit
+    }
+
+    fn cancel_tagged(&mut self, mask: u64, value: u64) {
+        let deferred = &mut self.deferred_destinations;
+        self.entries.retain(|entry| {
+            let cancel = matches!(entry, Entry::Request { req, .. } | Entry::Refused { req, .. } if req.tag & mask == value);
+            if cancel {
+                *deferred -= usize::from(entry.has_deferred_destination());
+            }
+            !cancel
+        });
+    }
+
+    fn take(&mut self) -> Vec<Entry> {
+        self.deferred_destinations = 0;
+        std::mem::take(&mut self.entries)
+    }
 }
 
 struct CancelRule {
@@ -1107,7 +1146,7 @@ impl QueueInner {
         if self.closed.load(Ordering::Acquire) {
             return;
         }
-        let batch = std::mem::take(&mut self.pending.lock().unwrap().entries);
+        let batch = self.pending.lock().unwrap().take();
         if batch.is_empty() {
             return;
         }
@@ -1211,17 +1250,6 @@ impl QueueInner {
         }
     }
 
-    fn should_auto_submit(entries: &[Entry], capacity: usize) -> bool {
-        // Heap-backed `DestinationPageArray` batches may still have their physical-page lists
-        // populated before the title calls `Submit()`: never auto-submit them mid-batch at half
-        // capacity, only if the queue actually fills.
-        let has_deferred_pages = entries
-            .iter()
-            .any(|e| matches!(e, Entry::Request { dest_pages: Some(_), dest_on_stack: false, .. }));
-        let limit = if has_deferred_pages { capacity } else { (capacity / 2).max(1) };
-        entries.len() >= limit
-    }
-
     fn enqueue(self: &Arc<Self>, e: Entry) {
         let auto = {
             let mut p = self.pending.lock().unwrap();
@@ -1233,8 +1261,7 @@ impl QueueInner {
                     slot.store(E_PENDING, Ordering::Release);
                 }
             }
-            p.entries.push(e);
-            Self::should_auto_submit(&p.entries, self.capacity)
+            p.push(e, self.capacity)
         };
         if auto {
             self.submit();
@@ -1258,8 +1285,7 @@ impl QueueInner {
             }
             let seq = p.next_seq;
             p.next_seq += 1;
-            p.entries.push(entry(seq));
-            Self::should_auto_submit(&p.entries, self.capacity)
+            p.push(entry(seq), self.capacity)
         };
         if auto {
             self.submit();
@@ -1327,7 +1353,7 @@ unsafe extern "system" fn factory_create_queue(_p: *mut c_void, desc: *const u8,
         desc: raw,
         source_memory: source == 1,
         capacity,
-        pending: Mutex::new(Pending { entries: Vec::new(), next_seq: 1 }),
+        pending: Mutex::new(Pending { next_seq: 1, ..Pending::default() }),
         cancels: Mutex::new(Vec::new()),
         worker: Mutex::new(None),
         worker_active: (Mutex::new(false), Condvar::new()),
@@ -1483,7 +1509,7 @@ unsafe extern "system" fn queue_cancel(p: *mut c_void, mask: u64, value: u64) {
     let q = queue(p);
     let cutoff = {
         let mut pend = q.pending.lock().unwrap();
-        pend.entries.retain(|e| !matches!(e, Entry::Request { req, .. } | Entry::Refused { req, .. } if req.tag & mask == value));
+        pend.cancel_tagged(mask, value);
         pend.next_seq.saturating_sub(1)
     };
     if cutoff == 0 {
@@ -1508,7 +1534,7 @@ unsafe extern "system" fn queue_close(p: *mut c_void) {
             Vec::new()
         } else {
             w.take();
-            std::mem::take(&mut pend.entries)
+            pend.take()
         }
     };
     for e in drained {
@@ -2895,23 +2921,56 @@ mod tests {
         }
     }
 
-    #[test]
-    fn deferred_page_array_batch_does_not_auto_submit_at_half_capacity() {
-        let mk = |dest_pages: Option<Vec<usize>>, dest_on_stack: bool| Entry::Request {
+    fn pending_request(tag: u64, dest_pages: Option<Vec<usize>>, dest_on_stack: bool) -> Entry {
+        let mut req = Request::parse(&[0u8; REQUEST_BYTES]);
+        req.tag = tag;
+        Entry::Request {
             seq: 1,
-            req: Request::parse(&[0u8; REQUEST_BYTES]),
+            req,
             file: None,
             dest_pages,
             dest_on_stack,
             src_pages: None,
-        };
+        }
+    }
+
+    #[test]
+    fn deferred_page_array_batch_does_not_auto_submit_at_half_capacity() {
+        let mut pending = Pending::default();
         // Regular requests still auto-submit at half capacity (capacity = 4 -> 2).
-        assert!(QueueInner::should_auto_submit(&[mk(None, false), mk(None, false)], 4));
+        assert!(!pending.push(pending_request(0, None, false), 4));
+        assert!(pending.push(pending_request(0, None, false), 4));
+        pending.take();
+
         // Stack-backed page arrays are already snapshotted at enqueue, so half-capacity stays on.
-        assert!(QueueInner::should_auto_submit(&[mk(Some(vec![1]), true), mk(None, false)], 4));
+        assert!(!pending.push(pending_request(0, Some(vec![1]), true), 4));
+        assert!(pending.push(pending_request(0, None, false), 4));
+        pending.take();
+
         // Heap-backed page arrays wait until Submit() or full capacity.
-        assert!(!QueueInner::should_auto_submit(&[mk(Some(vec![1]), false), mk(None, false)], 4));
-        assert!(!QueueInner::should_auto_submit(&[mk(Some(vec![1]), false), mk(None, false), mk(None, false)], 4));
-        assert!(QueueInner::should_auto_submit(&[mk(Some(vec![1]), false), mk(None, false), mk(None, false), mk(None, false)], 4));
+        assert!(!pending.push(pending_request(0, Some(vec![1]), false), 4));
+        assert!(!pending.push(pending_request(0, None, false), 4));
+        assert!(!pending.push(pending_request(0, None, false), 4));
+        assert!(pending.push(pending_request(0, None, false), 4));
+        assert_eq!(pending.take().len(), 4);
+        assert!(!pending.push(pending_request(0, None, false), 4));
+        assert!(pending.push(pending_request(0, None, false), 4));
+    }
+
+    #[test]
+    fn cancelling_deferred_destinations_restores_half_capacity_only_after_the_last_one() {
+        let mut pending = Pending::default();
+        assert!(!pending.push(pending_request(0x11, Some(vec![1]), false), 4));
+        assert!(!pending.push(pending_request(0x22, Some(vec![2]), false), 4));
+        pending.cancel_tagged(0xf0, 0x10);
+        assert!(!pending.push(pending_request(0x33, Some(vec![3]), true), 4));
+        pending.cancel_tagged(0xf0, 0x20);
+        assert!(pending.push(pending_request(0x44, None, false), 4));
+        let batch = pending.take();
+        let tags: Vec<_> = batch.iter().map(|entry| match entry {
+            Entry::Request { req, .. } => req.tag,
+            _ => panic!("expected pending request"),
+        }).collect();
+        assert_eq!(tags, [0x33, 0x44]);
     }
 }
