@@ -42,6 +42,11 @@ unsafe fn commit(page: usize) -> bool {
         return false;
     }
     if VirtualAlloc(page as *const c_void, PAGE, MEM_COMMIT, PAGE_READWRITE).is_null() {
+        static LOGGED: Once = Once::new();
+        let err = windows_sys::Win32::Foundation::GetLastError();
+        LOGGED.call_once(|| {
+            crate::xlog_warn!("kernelx::lazy: VirtualAlloc(MEM_COMMIT) failed at {page:#x} (err={err})");
+        });
         return false;
     }
     // (a view of a physical page committed here is writable, not guarded: count it as written)

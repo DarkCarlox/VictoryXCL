@@ -689,6 +689,72 @@ fn subresource(t: &Texture, plane: u32, sub: u32) -> Option<(&Surface, u64, usiz
     (k < s.array as usize).then_some((s, at, i, k))
 }
 
+/// Resolve a title virtual address (which may lie in a no-CPU-access GPU view) to its
+/// CPU-accessible backing address, or `None` if an unmapped GPU-view page.
+fn resolve_cpu_addr(va: usize) -> Option<usize> {
+    match crate::hle::kernelx::mirrors::mapped_source(va) {
+        Some(Some(mapped)) => Some(mapped),
+        Some(None) => None,
+        None => Some(crate::hle::kernelx::mirrors::source(va).unwrap_or(va)),
+    }
+}
+
+/// Copy `src` into title memory at `dst`, resolving GPU-view aliases and ensuring lazy/guarded pages.
+unsafe fn copy_to_title(dst: usize, src: &[u8]) {
+    if src.is_empty() {
+        return;
+    }
+    let end = dst + src.len();
+    if crate::hle::kernelx::mirrors::source(dst).is_none()
+        && crate::hle::kernelx::mirrors::source(end - 1).is_none()
+    {
+        let _open = crate::hle::kernelx::lazy::ensure(dst, src.len());
+        std::ptr::copy_nonoverlapping(src.as_ptr(), dst as *mut u8, src.len());
+        return;
+    }
+    let mut at = dst;
+    let mut off = 0usize;
+    while at < end {
+        let next = ((at & !(TILE_BYTES - 1)) + TILE_BYTES).min(end);
+        let step = next - at;
+        if let Some(cpu) = resolve_cpu_addr(at) {
+            let _open = crate::hle::kernelx::lazy::ensure(cpu, step);
+            std::ptr::copy_nonoverlapping(src[off..].as_ptr(), cpu as *mut u8, step);
+        }
+        at = next;
+        off += step;
+    }
+}
+
+/// Copy from title memory at `src` into `dst`, resolving GPU-view aliases and ensuring lazy/guarded pages.
+unsafe fn copy_from_title(src: usize, dst: &mut [u8]) {
+    if dst.is_empty() {
+        return;
+    }
+    let end = src + dst.len();
+    if crate::hle::kernelx::mirrors::source(src).is_none()
+        && crate::hle::kernelx::mirrors::source(end - 1).is_none()
+    {
+        let _open = crate::hle::kernelx::lazy::ensure(src, dst.len());
+        std::ptr::copy_nonoverlapping(src as *const u8, dst.as_mut_ptr(), dst.len());
+        return;
+    }
+    let mut at = src;
+    let mut off = 0usize;
+    while at < end {
+        let next = ((at & !(TILE_BYTES - 1)) + TILE_BYTES).min(end);
+        let step = next - at;
+        if let Some(cpu) = resolve_cpu_addr(at) {
+            let _open = crate::hle::kernelx::lazy::ensure(cpu, step);
+            std::ptr::copy_nonoverlapping(cpu as *const u8, dst[off..].as_mut_ptr(), step);
+        } else {
+            dst[off..off + step].fill(0);
+        }
+        at = next;
+        off += step;
+    }
+}
+
 /// rows of `src` (`row_pitch` apart) → the level's place in `dst` (the whole resource)
 unsafe extern "system" fn copy_into(p: *mut c_void, dst: *mut u8, plane: u32, sub: u32, src: *const u8, row_pitch: u32, slice_pitch: u32) -> HRESULT {
     let Some((t, at, i, k)) = subresource(tex(p), plane, sub).filter(|_| !dst.is_null() && !src.is_null()) else { return E_INVALIDARG };
@@ -698,17 +764,41 @@ unsafe extern "system" fn copy_into(p: *mut c_void, dst: *mut u8, plane: u32, su
         let mut linear = vec![0u8; row * m.height * m.depth];
         for (n, to) in linear.chunks_exact_mut(row).enumerate() {
             let from = n / m.height * slice_pitch as usize + n % m.height * row_pitch as usize;
-            to.copy_from_slice(std::slice::from_raw_parts(src.add(from), row));
+            copy_from_title(src.add(from) as usize, to);
         }
-        t.chain.tile_volume(std::slice::from_raw_parts_mut(dst.add(at as usize), t.size() as usize), i, &linear);
+        let dst_at = dst.add(at as usize) as usize;
+        let dst_len = t.size() as usize;
+        if crate::hle::kernelx::mirrors::source(dst_at).is_none()
+            && crate::hle::kernelx::mirrors::source(dst_at + dst_len.saturating_sub(1)).is_none()
+        {
+            let _open = crate::hle::kernelx::lazy::ensure(dst_at, dst_len);
+            t.chain.tile_volume(std::slice::from_raw_parts_mut(dst_at as *mut u8, dst_len), i, &linear);
+        } else {
+            let mut tiled = vec![0u8; dst_len];
+            copy_from_title(dst_at, &mut tiled);
+            t.chain.tile_volume(&mut tiled, i, &linear);
+            copy_to_title(dst_at, &tiled);
+        }
         return S_OK;
     }
     let mut linear = vec![0u8; row * m.height];
     for y in 0..m.height {
-        linear[y * row..(y + 1) * row].copy_from_slice(std::slice::from_raw_parts(src.add(y * row_pitch as usize), row));
+        copy_from_title(src.add(y * row_pitch as usize) as usize, &mut linear[y * row..(y + 1) * row]);
     }
-    let slice = std::slice::from_raw_parts_mut(dst.add(at as usize + k * t.chain.slice_bytes), t.chain.slice_bytes);
-    t.chain.tile_level(slice, i, k, &linear);
+    let slice_at = dst.add(at as usize + k * t.chain.slice_bytes) as usize;
+    let slice_len = t.chain.slice_bytes;
+    if crate::hle::kernelx::mirrors::source(slice_at).is_none()
+        && crate::hle::kernelx::mirrors::source(slice_at + slice_len.saturating_sub(1)).is_none()
+    {
+        let _open = crate::hle::kernelx::lazy::ensure(slice_at, slice_len);
+        let slice = std::slice::from_raw_parts_mut(slice_at as *mut u8, slice_len);
+        t.chain.tile_level(slice, i, k, &linear);
+    } else {
+        let mut tiled = vec![0u8; slice_len];
+        copy_from_title(slice_at, &mut tiled);
+        t.chain.tile_level(&mut tiled, i, k, &linear);
+        copy_to_title(slice_at, &tiled);
+    }
     S_OK
 }
 
@@ -718,17 +808,38 @@ unsafe extern "system" fn copy_from(p: *mut c_void, dst: *mut u8, plane: u32, su
     let m = t.chain.levels[i];
     let row = m.width * t.bpe as usize;
     if t.depth > 0 {
-        let linear = t.chain.detile_volume(std::slice::from_raw_parts(src.add(at as usize), t.size() as usize), i);
+        let src_at = src.add(at as usize) as usize;
+        let src_len = t.size() as usize;
+        let linear = if crate::hle::kernelx::mirrors::source(src_at).is_none()
+            && crate::hle::kernelx::mirrors::source(src_at + src_len.saturating_sub(1)).is_none()
+        {
+            let _open = crate::hle::kernelx::lazy::ensure(src_at, src_len);
+            t.chain.detile_volume(std::slice::from_raw_parts(src_at as *const u8, src_len), i)
+        } else {
+            let mut tiled = vec![0u8; src_len];
+            copy_from_title(src_at, &mut tiled);
+            t.chain.detile_volume(&tiled, i)
+        };
         for (n, from) in linear.chunks_exact(row).enumerate() {
             let to = n / m.height * slice_pitch as usize + n % m.height * row_pitch as usize;
-            std::ptr::copy_nonoverlapping(from.as_ptr(), dst.add(to), row);
+            copy_to_title(dst.add(to) as usize, from);
         }
         return S_OK;
     }
-    let slice = std::slice::from_raw_parts(src.add(at as usize + k * t.chain.slice_bytes), t.chain.slice_bytes);
-    let linear = t.chain.detile_level(slice, i, k);
+    let slice_at = src.add(at as usize + k * t.chain.slice_bytes) as usize;
+    let slice_len = t.chain.slice_bytes;
+    let linear = if crate::hle::kernelx::mirrors::source(slice_at).is_none()
+        && crate::hle::kernelx::mirrors::source(slice_at + slice_len.saturating_sub(1)).is_none()
+    {
+        let _open = crate::hle::kernelx::lazy::ensure(slice_at, slice_len);
+        t.chain.detile_level(std::slice::from_raw_parts(slice_at as *const u8, slice_len), i, k)
+    } else {
+        let mut tiled = vec![0u8; slice_len];
+        copy_from_title(slice_at, &mut tiled);
+        t.chain.detile_level(&tiled, i, k)
+    };
     for y in 0..m.height {
-        std::ptr::copy_nonoverlapping(linear[y * row..].as_ptr(), dst.add(y * row_pitch as usize), row);
+        copy_to_title(dst.add(y * row_pitch as usize) as usize, &linear[y * row..(y + 1) * row]);
     }
     S_OK
 }
@@ -842,5 +953,35 @@ mod tests {
         let mut bad = desc(256, 256, 1, 1, 40, 0x100 | 25);
         bad[0x30..0x34].copy_from_slice(&2u32.to_le_bytes());
         assert_eq!(Texture::new(&bad).err(), Some(E_INVALIDARG), "non-Z mode 25 must fail with E_INVALIDARG");
+    }
+
+    #[test]
+    fn copy_from_and_into_gpu_view_translate_to_cpu_view() {
+        use windows_sys::Win32::System::Memory::{VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE};
+        unsafe {
+            let size = 4 << 20;
+            let cpu = VirtualAlloc(std::ptr::null(), size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) as usize;
+            let gpu = VirtualAlloc(std::ptr::null(), size, MEM_RESERVE, PAGE_NOACCESS) as usize;
+            assert!(cpu != 0 && gpu != 0);
+            crate::hle::kernelx::mirrors::reserved(cpu, size, 0x2040_2000, PAGE_READWRITE);
+            crate::hle::kernelx::mirrors::reserved(gpu, size, 0x2040_2000, 0x800 | PAGE_NOACCESS);
+
+            let d = desc(64, 64, 1, 1, 28, 0x109);
+            let mut comp = std::ptr::null_mut();
+            assert_eq!(XGCreateTextureComputer(d.as_ptr(), &mut comp), S_OK);
+            let src_linear: Vec<u8> = (0..(64 * 64 * 4)).map(|i| (i % 251) as u8).collect();
+            let tiled_off = 0x10_000usize;
+            let out_off = 0x80_000usize;
+            assert_eq!(copy_into(comp, (gpu + tiled_off) as *mut u8, 0, 0, src_linear.as_ptr(), 64 * 4, 0), S_OK);
+            assert_eq!(copy_from(comp, (gpu + out_off) as *mut u8, 0, 0, (gpu + tiled_off) as *const u8, 64 * 4, 0), S_OK);
+            let roundtrip = std::slice::from_raw_parts((cpu + out_off) as *const u8, src_linear.len());
+            assert_eq!(roundtrip, src_linear.as_slice());
+
+            assert_eq!(release(comp), 0);
+            crate::hle::kernelx::mirrors::released(gpu);
+            crate::hle::kernelx::mirrors::released(cpu);
+            VirtualFree(gpu as *mut c_void, 0, MEM_RELEASE);
+            VirtualFree(cpu as *mut c_void, 0, MEM_RELEASE);
+        }
     }
 }

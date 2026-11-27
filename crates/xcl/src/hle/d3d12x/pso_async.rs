@@ -487,9 +487,9 @@ fn enqueue(p: Arc<Pending>) {
 
 /// OS virtual commit headroom thresholds (`ullAvailPageFile`) for throttling background PSO
 /// compilation well before Windows runs out of commit (`XCL_PSO_MEM_THROTTLE=0`: off).
-const PRELOAD_PAUSE_COMMIT: u64 = 2560 << 20;
-const WORKER_CAP_2_COMMIT: u64 = 2048 << 20;
-const WORKER_CAP_1_COMMIT: u64 = 1024 << 20;
+const PRELOAD_PAUSE_COMMIT: u64 = 3584 << 20;
+const WORKER_CAP_2_COMMIT: u64 = 2560 << 20;
+const WORKER_CAP_1_COMMIT: u64 = 1536 << 20;
 
 fn mem_throttle_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
