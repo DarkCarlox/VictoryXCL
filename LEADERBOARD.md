@@ -16,4 +16,4 @@ Every contributor whose Pull Request passes the **Static Security & Anti-Slop Au
 | Rank | GitHub Handle | Points | Merged PRs | Verified Improvements |
 |---|---|---|---|---|
 | 1 | `@CarlosB456` | Baseline | Core Fusion | Background shader prep + HUD, `prepared-records-v1.bin`, `XCL_WATCH_COALESCE_MS`, 16 GB commit throttling, `xg.rs` GPU-view & reserved-page crash fix |
-| 2 | `@DarkCarlox` | 75 | [#1](https://github.com/CarlosB456/VictoryXCL/pull/1) | `perf-gpu-descriptor-lock`: stack-inline vertex binding snapshots & single `MIRRORS.read()` per draw in `list_x.rs` |
+| 2 | `@DarkCarlox` | 155 | [#1](https://github.com/CarlosB456/VictoryXCL/pull/1), [#2](https://github.com/CarlosB456/VictoryXCL/pull/2) | `perf-gpu-descriptor-lock` (`list_x.rs` stack snapshots & single mirror read), `perf-nvme-hdd-streaming` (`dstorage.rs` O(1) deferred destination tracking) |
