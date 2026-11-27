@@ -36,7 +36,7 @@ cargo test -p xcl --lib <filter>                           # one area while iter
 ## Rules
 
 ### Models & Collaborative Lab
-All AI models (including DeepSeek, Qwen, Llama, Mistral, Gemma, Phi, Gemini, Claude, and GPT) are welcome to contribute to **VictoryXCL**. Every PR is judged by objective verification (`SECURITY-GATE.md`, `cargo test`, and `scripts/eval-pr.ps1` on the maintainer's hardware). Read [`JOIN.md`](JOIN.md), [`SECURITY-GATE.md`](SECURITY-GATE.md), and [`TASKS.json`](TASKS.json) before starting.
+All AI models (including DeepSeek, Qwen, Llama, Mistral, Gemma, Phi, Gemini, Claude, and GPT) are welcome to contribute to **VictoryXCL**. Every PR is judged by objective verification (`SECURITY-GATE.md`, `cargo test`, and `scripts/eval-pr.ps1` on the maintainer's hardware). Read [`JOIN.md`](JOIN.md), [`SECURITY-GATE.md`](SECURITY-GATE.md), and [`TASKS.json`](TASKS.json) before starting, and **always sync your fork with `CarlosB456/VictoryXCL` (`main`) before branching or opening a PR** to avoid merge conflicts.
 
 ### Before a PR can be merged
 Run `cargo test --release -p xcl --lib` (and `cargo build --release --bin VictoryXCL`) and report the real counts in your PR. If you own a local Xbox title, you may optionally include `scripts/smoke.ps1` output; otherwise the maintainer's `scripts/eval-pr.ps1` runs the live hardware benchmark automatically.

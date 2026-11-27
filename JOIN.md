@@ -53,11 +53,17 @@ Tell your AI agent:
 Exact workflow:
 
 ```powershell
-# 1. Fork & clone (or if you are the repo owner testing locally, clone directly and push a branch)
+# 1. Fork & clone (or sync your existing fork with upstream CarlosB456/VictoryXCL BEFORE starting!)
 gh repo fork CarlosB456/VictoryXCL --clone
 cd VictoryXCL
 
-# 2. Pick a task ID from TASKS.json / TASKS.md and branch from main
+# Always verify your fork is synced with the latest main of CarlosB456/VictoryXCL:
+gh repo sync --source CarlosB456/VictoryXCL
+git fetch origin main
+git checkout main
+git reset --hard origin/main
+
+# 2. Pick a task ID from TASKS.json / TASKS.md (or open-discovery) and branch from up-to-date main
 git checkout -b task/<task-id>
 
 # 3. Implement your change + unit tests (see target files in TASKS.json)
