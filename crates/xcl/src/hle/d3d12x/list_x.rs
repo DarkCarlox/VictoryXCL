@@ -4384,7 +4384,14 @@ static MIRROR_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// Where `[va, va + bytes)` is in a mirror, if it is in one.
 fn mirrored(va: u64, bytes: usize) -> Option<usize> {
-    MIRRORS.read().unwrap().iter().find(|&&(s, l, _)| va >= s && va + bytes as u64 <= s + l as u64).map(|&(s, _, m)| m + (va - s) as usize)
+    find_mirror(&MIRRORS.read().unwrap(), va, bytes)
+}
+
+fn find_mirror(mirrors: &[(u64, usize, usize)], va: u64, bytes: usize) -> Option<usize> {
+    mirrors
+        .iter()
+        .find(|&&(start, len, _)| va >= start && va + bytes as u64 <= start + len as u64)
+        .map(|&(start, _, mirror)| mirror + (va - start) as usize)
 }
 
 /// Per mirror (start, bytes, a bit per 4 KiB page from `start & !0xfff`): pages of its source
@@ -4601,25 +4608,61 @@ unsafe fn mirror_of(va: u64, bytes: usize, what: &str) -> Option<usize> {
     Some(p + (va - start) as usize)
 }
 
+const DRAW_VERTEX_SLOTS: usize = D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT as usize;
+
+#[derive(Clone, Copy, Default)]
+struct DrawVertexBuffer {
+    title: (u64, u32, u32),
+    mirror: Option<usize>,
+}
+
+fn snapshot_vertex_buffers<'a>(
+    bindings: &Bindings,
+    inline: &'a mut [DrawVertexBuffer; DRAW_VERTEX_SLOTS],
+    overflow: &'a mut Vec<DrawVertexBuffer>,
+) -> &'a mut [DrawVertexBuffer] {
+    let len = bindings.vertex_titles.len();
+    let buffers = if let Some(slots) = inline.get_mut(..len) {
+        slots
+    } else {
+        // Keep every recorded binding even if the title exceeded the PC input-slot limit.
+        overflow.resize(len, DrawVertexBuffer::default());
+        overflow.as_mut_slice()
+    };
+    for (buffer, &title) in buffers.iter_mut().zip(bindings.vertex_titles.values()) {
+        *buffer = DrawVertexBuffer { title, mirror: None };
+    }
+    buffers
+}
+
 /// Before a draw on `list`: the parts of mirrored buffers it reads are copied from the title's
 /// memory. `indexed`: (first index, index count, base vertex); else `first_vertex`, `vertices`.
 pub(super) unsafe fn sync_title_buffers(list: *mut c_void, indexed: Option<(u32, u32, i32)>, first_vertex: u32, vertices: u32, instances: u32) {
     if MIRROR_BYTES.load(Ordering::Relaxed) == 0 {
         return;
     }
+    let mut inline = [DrawVertexBuffer::default(); DRAW_VERTEX_SLOTS];
+    let mut overflow = Vec::new();
     let (vbs, ib) = {
         let g = LISTS.lock().unwrap();
         let Some(b) = g.as_ref().and_then(|m| m.get(&(list as usize))).map(|s| &s.bindings) else { return };
-        (b.vertex_titles.values().copied().collect::<Vec<_>>(), b.index_title)
+        (snapshot_vertex_buffers(b, &mut inline, &mut overflow), b.index_title)
     };
-    let mirrors: Vec<Option<usize>> = {
-        let mut v: Vec<Option<usize>> = vbs.iter().map(|&(va, bytes, _)| mirrored(va, bytes as usize)).collect();
-        v.push(ib.and_then(|(va, bytes, _)| mirrored(va, bytes as usize)));
-        if v.iter().all(Option::is_none) {
-            return;
+    if vbs.is_empty() && ib.is_none() {
+        return;
+    }
+    // Resolve the whole draw under one read guard, after releasing LISTS and before copying.
+    let index_mirror = {
+        let mirrors = MIRRORS.read().unwrap();
+        for buffer in vbs.iter_mut() {
+            let (va, bytes, _) = buffer.title;
+            buffer.mirror = find_mirror(&mirrors, va, bytes as usize);
         }
-        v
+        ib.and_then(|(va, bytes, _)| find_mirror(&mirrors, va, bytes as usize))
     };
+    if index_mirror.is_none() && vbs.iter().all(|buffer| buffer.mirror.is_none()) {
+        return;
+    }
     let copy = |va: u64, mirror: usize, bytes: u32, from: u64, len: u64| copy_written(va, mirror, bytes, from, len);
     // the vertices read: [lo, hi)
     let (lo, hi) = match (indexed, ib) {
@@ -4629,7 +4672,7 @@ pub(super) unsafe fn sync_title_buffers(list: *mut c_void, indexed: Option<(u32,
             let n = (len.min((bytes as u64).saturating_sub(from)) / size) as usize;
             // the indices are read from the mirror once copied there, which is readable whatever
             // the title did to its memory; an index buffer without a mirror is checked
-            let at = match mirrors[vbs.len()] {
+            let at = match index_mirror {
                 Some(m) => {
                     copy(va, m, bytes, from, len);
                     Some(m + from as usize)
@@ -4657,8 +4700,8 @@ pub(super) unsafe fn sync_title_buffers(list: *mut c_void, indexed: Option<(u32,
         (Some(_), None) => (0, u64::MAX),
         (None, _) => (first_vertex as u64, first_vertex as u64 + vertices as u64),
     };
-    for (k, &(va, bytes, stride)) in vbs.iter().enumerate() {
-        let Some(m) = mirrors[k] else { continue };
+    for &DrawVertexBuffer { title: (va, bytes, stride), mirror } in vbs.iter() {
+        let Some(m) = mirror else { continue };
         // a buffer stepped by instance is not told apart: with instances (callers pass more
         // than 1 for a first instance other than 0 too), all of it
         if instances > 1 || hi == u64::MAX || stride == 0 || hi.saturating_mul(stride as u64) > bytes as u64 {
@@ -8605,6 +8648,45 @@ mod tests {
                 gr.cells.remove(&va_c);
             }
         }
+    }
+
+    #[test]
+    fn draw_vertex_snapshot_uses_inline_storage_and_preserves_overflow() {
+        let mut bindings = Bindings::default();
+        let mut inline = [DrawVertexBuffer::default(); DRAW_VERTEX_SLOTS];
+        let inline_ptr = inline.as_ptr();
+        let mut overflow = Vec::new();
+
+        for slot in (0..DRAW_VERTEX_SLOTS as u32).rev() {
+            bindings.vertex_titles.insert(slot, (0x1000 + u64::from(slot) * 0x100, 32, 16));
+        }
+        let snapshot = snapshot_vertex_buffers(&bindings, &mut inline, &mut overflow);
+        assert_eq!(snapshot.as_ptr(), inline_ptr);
+        assert_eq!(snapshot.len(), DRAW_VERTEX_SLOTS);
+        assert!(snapshot.iter().map(|buffer| buffer.title).eq(bindings.vertex_titles.values().copied()));
+        snapshot[0].mirror = Some(0x2000);
+        assert_eq!(overflow.capacity(), 0);
+
+        bindings.vertex_titles.insert(DRAW_VERTEX_SLOTS as u32, (0x9000, 64, 4));
+        let snapshot = snapshot_vertex_buffers(&bindings, &mut inline, &mut overflow);
+        assert_eq!(snapshot.len(), DRAW_VERTEX_SLOTS + 1);
+        assert!(snapshot.iter().map(|buffer| buffer.title).eq(bindings.vertex_titles.values().copied()));
+        assert!(snapshot.iter().all(|buffer| buffer.mirror.is_none()));
+
+        bindings.vertex_titles.retain(|&slot, _| slot == 0);
+        let snapshot = snapshot_vertex_buffers(&bindings, &mut inline, &mut overflow);
+        assert_eq!(snapshot.as_ptr(), inline_ptr);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].title, (0x1000, 32, 16));
+        assert_eq!(snapshot[0].mirror, None);
+    }
+
+    #[test]
+    fn draw_mirror_lookup_preserves_first_match_and_checks_the_whole_range() {
+        let mirrors = [(0x1000, 0x100, 0x3000), (0x1080, 0x100, 0x4000)];
+        assert_eq!(find_mirror(&mirrors, 0x1080, 0x80), Some(0x3080));
+        assert_eq!(find_mirror(&mirrors, 0x1080, 0x81), Some(0x4000));
+        assert_eq!(find_mirror(&mirrors, 0x117f, 2), None);
     }
 
     /// A buffer outside unified memory that has a mirror is bound at its mirror again without
