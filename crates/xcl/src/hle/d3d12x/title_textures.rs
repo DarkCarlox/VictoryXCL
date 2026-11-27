@@ -873,6 +873,27 @@ pub(super) fn is_own_work() -> bool {
     BUSY.with(|b| b.get())
 }
 
+static FORCE_WATCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static LAST_WATCH_MS: AtomicU64 = AtomicU64::new(0);
+
+fn watch_epoch() -> std::time::Instant {
+    static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *T0.get_or_init(std::time::Instant::now)
+}
+
+fn watch_coalesce_ms() -> u64 {
+    if cfg!(test) {
+        return 0;
+    }
+    static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *MS.get_or_init(|| {
+        std::env::var("XCL_WATCH_COALESCE_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(8)
+    })
+}
+
 /// Before the title's GPU work: textures whose memory the CPU wrote since the last look are
 /// uploaded again.
 pub(super) unsafe fn refresh(queue: *mut c_void) {
@@ -880,8 +901,18 @@ pub(super) unsafe fn refresh(queue: *mut c_void) {
     if BUSY.with(|b| b.get()) {
         return;
     }
+    let coalesce = watch_coalesce_ms();
+    if coalesce > 0 && PENDING.load(Ordering::Relaxed) == 0 && !FORCE_WATCH.load(Ordering::Acquire) {
+        let now_ms = watch_epoch().elapsed().as_millis() as u64;
+        let last = LAST_WATCH_MS.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(last) < coalesce {
+            return;
+        }
+    }
     let _refresh = REFRESH.lock().unwrap();
+    FORCE_WATCH.store(false, Ordering::Release);
     own_work(|| refresh_once(queue));
+    LAST_WATCH_MS.store(watch_epoch().elapsed().as_millis() as u64, Ordering::Release);
 }
 
 /// The pages of `[base, base + size)` written since the last look, added to `dirty` and reset
