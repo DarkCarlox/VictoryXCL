@@ -252,7 +252,7 @@ $benchDir = Join-Path $env:TEMP ("victoryxcl-bench-" + [guid]::NewGuid().ToStrin
 
 try {
     Write-Host "Creating isolated worktree at $wtDir ($($target.Commit))..."
-    git -C $RepoRoot worktree add --detach $wtDir $($target.Commit) 2>&1 | Out-Host
+    Invoke-GitQuiet @('worktree', 'add', '--detach', $wtDir, $target.Commit)
     if ($LASTEXITCODE -ne 0) { throw "Failed to create git worktree" }
 
     Write-Host "Running unit tests in isolated worktree (with XCL_D3D12_DIR set)..."
@@ -274,7 +274,7 @@ try {
         Write-Host "PR had $($prFailed.Count) failing test(s); checking against baseline ($baseCommit) for regressions..." -ForegroundColor Yellow
         $baseWt = Join-Path $env:TEMP ("victoryxcl-base-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
         try {
-            git -C $RepoRoot worktree add --detach $baseWt $baseCommit 2>&1 | Out-Null
+            Invoke-GitQuiet @('worktree', 'add', '--detach', $baseWt, $baseCommit)
             if (Test-Path $d3d12Dir) { [Environment]::SetEnvironmentVariable('XCL_D3D12_DIR', $d3d12Dir, 'Process') }
             $baseArgs = @('test', '--release', '--manifest-path', (Join-Path $baseWt 'Cargo.toml'), '-p', 'xcl', '--lib')
             if ($TestFilter) { $baseArgs += @('--', $TestFilter, '--test-threads=1') } else { $baseArgs += @('--', '--test-threads=1') }
@@ -282,7 +282,7 @@ try {
             $baseFailed = @($baseTestLines | Where-Object { $_ -match '^test (\S+) \.\.\. FAILED$' } | ForEach-Object { $Matches[1] })
         } finally {
             [Environment]::SetEnvironmentVariable('XCL_D3D12_DIR', $savedD3d12, 'Process')
-            if (Test-Path $baseWt) { git -C $RepoRoot worktree remove --force $baseWt 2>&1 | Out-Null }
+            if (Test-Path $baseWt) { Invoke-GitQuiet @('worktree', 'remove', '--force', $baseWt) }
         }
         $newFailures = @($prFailed | Where-Object { $_ -notin $baseFailed })
         if ($newFailures.Count -gt 0) {
@@ -338,6 +338,6 @@ try {
     }
 } finally {
     if (Test-Path $wtDir) {
-        git -C $RepoRoot worktree remove --force $wtDir 2>&1 | Out-Null
+        Invoke-GitQuiet @('worktree', 'remove', '--force', $wtDir)
     }
 }

@@ -13,7 +13,9 @@ param(
     [string]$Repo = 'CarlosB456/VictoryXCL',
     [string]$GameDir = 'C:\Users\Benja\Downloads\GTA6.Xbox.v1.0.2.1-CYBERLEEK',
     [int]$Seconds = 90,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$Loop,
+    [int]$IntervalSeconds = 300
 )
 
 $ErrorActionPreference = 'Stop'
@@ -27,13 +29,14 @@ if (-not (Test-Path $StateDir)) {
     $null = New-Item -ItemType Directory -Path $StateDir -Force
 }
 
-# 1. Single-instance lock: never start a new PR evaluation while one is still running
+function Invoke-WatchOnce {
+    # 1. Single-instance lock: never start a new PR evaluation while one is still running
 if (Test-Path $LockFile) {
     try {
         $lock = Get-Content $LockFile -Raw | ConvertFrom-Json
         if ($lock.pid -and (Get-Process -Id ([int]$lock.pid) -ErrorAction SilentlyContinue)) {
             Write-Host "[pr-watcher] Evaluation already in progress (PID $($lock.pid) on PR #$($lock.pr)). Exiting."
-            exit 0
+            return
         }
     } catch { }
     Remove-Item $LockFile -Force -ErrorAction SilentlyContinue
@@ -58,13 +61,13 @@ $ghExit = $LASTEXITCODE
 $ErrorActionPreference = $prevErr
 if ($ghExit -ne 0 -or -not $prsJson) {
     Write-Host "[pr-watcher] gh pr list returned no data (exit $ghExit)."
-    exit 0
+    return
 }
 
 $prs = @($prsJson | ConvertFrom-Json | Where-Object { $_ -ne $null })
 if ($prs.Count -eq 0) {
     Write-Host "[pr-watcher] No open PRs in $Repo. 0 tokens used."
-    exit 0
+    return
 }
 
 # 4. Pick the FIRST unevaluated open PR (sequential: finish one completely before another)
@@ -90,7 +93,7 @@ foreach ($pr in ($prs | Sort-Object number)) {
 
 if (-not $nextPr) {
     Write-Host "[pr-watcher] All open PRs already evaluated. 0 tokens used."
-    exit 0
+    return
 }
 
 $prNum = $nextPr.number
@@ -99,7 +102,7 @@ $key = "${prNum}:${head}"
 
 if ($DryRun) {
     Write-Host "[pr-watcher] DryRun: would trigger Antigravity for PR #$prNum ($head) - $($nextPr.title)"
-    exit 0
+    return
 }
 
 if (-not (Test-Path $AgentApi)) {
@@ -152,4 +155,14 @@ Steps:
     }
 } finally {
     Remove-Item $LockFile -Force -ErrorAction SilentlyContinue
+}
+}
+
+if ($Loop) {
+    while ($true) {
+        try { Invoke-WatchOnce } catch { Write-Warning "[pr-watcher] $_" }
+        Start-Sleep -Seconds $IntervalSeconds
+    }
+} else {
+    Invoke-WatchOnce
 }
