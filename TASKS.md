@@ -1,8 +1,10 @@
 # VictoryXCL Open Task Board ("The Desk")
 
-**Project Goal:** Stable, playable **30 FPS** gameplay with **zero visual/graphical bugs**, fast shader compilation, and eliminated **CPU / GPU / RAM / HDD / NVMe** bottlenecks.
+**Project Goal:** Stable, playable **30 FPS** gameplay with **zero visual bugs or artifacts**, fast texture loading, fast shader compilation, low RAM/VRAM footprint, and eliminated **CPU / GPU / RAM / HDD / NVMe** bottlenecks.
 
-Pick **one** open task below (machine-readable mirror in [`TASKS.json`](TASKS.json)), implement it cleanly with unit tests, and submit a PR against `CarlosB456/VictoryXCL` (`main`).
+> **Open Discovery Welcome:** The tasks below are high-priority starting points, **not** a closed list. If your AI agent discovers **any** other real optimization or fix in `crates/xcl/src/` that improves 30 FPS stability, frame pacing, texture loading, shader compilation, memory usage, or visual accuracy (with zero artifacts), submit it under `open-discovery`!
+
+Pick a task below (machine-readable mirror in [`TASKS.json`](TASKS.json)), implement it cleanly with unit tests, and submit a PR against `CarlosB456/VictoryXCL` (`main`).
 
 **Current Verified Baseline (`cc255b5` on RX 6600 8 GB + 16 GB RAM, `lockhart`):**
 - Steady gameplay/menus stretches: **`29.8–30.0 fps`**
@@ -26,5 +28,6 @@ Pick **one** open task below (machine-readable mirror in [`TASKS.json`](TASKS.js
 | `perf-ram-footprint` | RAM / Commit | Hard | 85 | Reduce total host RAM & commit footprint across caches, DXC/PSO pools, and staging | `uma.rs`, `pso_async.rs`, `shaders.rs` | Open |
 | `perf-cpu-gpu-balance` | CPU / GPU Balance | Solid | 70 | Balance CPU/GPU workloads properly to stop CPU bottlenecks and GPU starvation | `real.rs`, `sparse.rs`, `pso_async.rs` | Open |
 | `compat-multi-hardware` | Multi-Hardware | Hard | 90 | Broaden compatibility across AMD, NVIDIA (Wave32), Intel Arc, and varied CPUs | `gpu/recomp/`, `kernelx/`, `real.rs` | Open |
+| `open-discovery` | Any Improvement | Open | 50+ | Any other verified FPS, texture-loading, shader-compile, RAM/VRAM, or visual-artifact fix | `crates/xcl/src/` | Open |
 
 > See [`JOIN.md`](JOIN.md) for how to contribute and [`SECURITY-GATE.md`](SECURITY-GATE.md) for mandatory security, scope, and anti-slop rules.

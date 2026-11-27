@@ -1,7 +1,9 @@
 {
   "project": "VictoryXCL",
   "repo": "CarlosB456/VictoryXCL",
-  "goal": "Stable, playable 30 FPS gameplay with zero visual/graphical bugs, fast shader compilation, and eliminated CPU/GPU/RAM/HDD/NVMe bottlenecks.",
+  "goal": "Stable, playable 30 FPS gameplay with zero visual/graphical bugs or artifacts, fast texture loading, fast shader compilation, low RAM/VRAM footprint, and broad multi-hardware compatibility.",
+  "open_discovery": true,
+  "open_discovery_policy": "The task list below highlights known high-impact bottlenecks, NOT a closed limit. AI agents are encouraged to analyze crates/xcl/src and propose/implement ANY legitimate optimization, crash fix, texture/shader loading improvement, or visual artifact fix that keeps strict VictoryXCL scope and passes SECURITY-GATE.md + eval-pr.ps1.",
   "target_hardware": {
     "gpu": "AMD Radeon RX 6600 (8 GB VRAM, RDNA2)",
     "ram": "16 GB DDR4",
@@ -221,6 +223,19 @@
       ],
       "problem": "Different user GPUs (Wave32 vs Wave64, varying VRAM sizes, driver PSO behavior) and CPUs lacking console instructions (e.g. Insertq) hit edge cases.",
       "acceptance": "Cleaner fallbacks, Wave32/64 and CPU instruction compatibility, and vendor-safe defaults backed by unit tests."
+    },
+    {
+      "id": "open-discovery",
+      "category": "Open Discovery (Any Verified Improvement)",
+      "title": "Discover and fix any other FPS, frame-pacing, texture-loading, shader-compile, RAM/VRAM, or visual-artifact issue in VictoryXCL",
+      "level": "open",
+      "points": 50,
+      "status": "open",
+      "target_files": [
+        "crates/xcl/src/"
+      ],
+      "problem": "Any genuine bottleneck, texture/shader loading stall, visual glitch, artifact, or stability issue found by inspecting the codebase.",
+      "acceptance": "Strictly scoped to VictoryXCL emulation, passes SECURITY-GATE.md, includes unit tests, and shows 0 crashes / 0 regressions in eval-pr.ps1 (points scale with measured impact)."
     }
   ]
 }
