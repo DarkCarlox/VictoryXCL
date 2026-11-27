@@ -23,6 +23,31 @@
   <b><a href="#contributing">Contributing</a></b>
 </p>
 
+# VictoryXCL – Fused Xbox Series X|S → Windows Compatibility Layer
+
+**VictoryXCL** (`CarlosB456/VictoryXCL`) is a fused, AMD- and 16 GB-RAM-optimized Xbox Series X|S (`Scarlett`) → Windows compatibility layer built on top of **XCL** (`amd-dev` + `main`), integrating rendering, loader, shader, and memory optimizations from **VIctory**, **cool_fox**, and **VIctory-Belobug-AMD**.
+
+## Fusion Architecture & Key Technologies
+
+- **Base Engine & RDNA2 → DXIL Recompiler (`xcl-dev/xcl` `amd-dev` + `main`):** Native x64 execution with HLE `kernelx`, `d3d12_xs`, `xg`, `DirectStorage`, `xapu`, and RDNA2→HLSL→DXIL shader translation.
+- **Non-Blocking Background Shader Prep & HUD (`VictoryXCL`):** Prepares shader records asynchronously while yielding (`should_yield_background()`) to active render frames, shows progress in a top-right HUD overlay, and persists prepared records (`prepared-records-v1.bin`).
+- **Visual Stability & Lighting (`VIctory` + `VictoryXCL` + `VIctory-Belobug-AMD`):** `XCL_NAN_GUARD` (`xcl_nan_guard` on pixel shader float exports) and sky-dome-only ambient tracking (`R16G16B16A16_FLOAT` filter in `ambient.rs`, rejecting `R11G11B10_FLOAT` to avoid frame-to-frame flicker).
+- **Loader Patches & Renderer Port 1 (`DoubleGhosty/cool_fox`):** Automatic 30 FPS / output-resolution loader patches, `Renderer Port 1` (`XCL_PORT_CONSTANTS=1`), 16 GB-aware coherent UMA sizing (`coherent_bytes_for()`), `lane_masks` (`st.halves`), and `XCL_WATCH_GAP_MB=64`.
+- **Release Profile, Write-Watch Coalescing & Memory Safety (`Belobug/VIctory-Belobug-AMD` + `VictoryXCL`):**
+  - ThinLTO + `codegen-units = 1` in `[profile.release]` (`Cargo.toml`).
+  - `XCL_WATCH_COALESCE_MS` write-watch coalescing in `title_textures.rs`.
+  - Commit-aware PSO/DXC worker throttling in `pso_async.rs` and AMD PSO disk caching (`XCL_PSO_DISK_CACHE=1`).
+  - GPU-view address translation and uncommitted-page guards in `xg::copy_from` / `xg::copy_into`.
+
+## Credits
+
+- **XCL** (`https://github.com/xcl-dev/xcl`) — Core compatibility layer, RDNA2→DXIL recompiler, UMA/sparse memory, and HLE subsystems.
+- **VIctory** (`https://github.com/Marvisak/VIctory`) — `XCL_NAN_GUARD` concept and D3D12/GPU execution insights.
+- **cool_fox** (`https://github.com/DoubleGhosty/cool_fox`) — Loader patches, `Renderer Port 1`, 16 GB UMA sizing, `lane_masks`, and `watch_gap` improvements.
+- **VIctory-Belobug-AMD** (`https://github.com/Belobug/VIctory-Belobug-AMD`) — ThinLTO/CGU=1 release profile (PR #96), AMD optimization patterns, and sky-dome ambient stability insights.
+
+---
+
 # XCL – Xbox Series X|S → Windows compatibility layer
 
 XCL is a compatibility layer that runs Xbox Series X|S (GDK) games you own on a Windows PC - in the spirit of Wine/Proton. There is no CPU emulation: the game's x64 code runs natively, and XCL provides its own, independently written implementations of the console system libraries the PC does not have (`kernelx.dll`, XGameRuntime, `d3d12_xs.dll`, …). The console's GPU code (RDNA2 machine code) is recompiled into PC shaders (HLSL → DXIL).
