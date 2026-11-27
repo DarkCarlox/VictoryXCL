@@ -126,10 +126,27 @@ Steps:
    gh pr merge $prNum --repo $Repo --squash --delete-branch
 "@
 
-    & cmd.exe /c "`"$AgentApi`" new-conversation -- `"$($prompt -replace '"', '\"' -replace "`r?`n", ' ')`""
-    $decision = if ($LASTEXITCODE -eq 0) { 'evaluated' } else { "agent-exit-$LASTEXITCODE" }
-    $evaluated[$key] = [pscustomobject]@{ pr = $prNum; head = $head; decision = $decision; at = (Get-Date -Format o) }
-    $evaluated | ConvertTo-Json -Depth 4 | Set-Content $StateFile -Encoding utf8
+    $singleLinePrompt = ($prompt -replace "`r?`n", ' ' -replace '\s{2,}', ' ').Trim()
+    $logFile = Join-Path $StateDir 'watcher.log'
+    "[$(Get-Date -Format o)] Starting evaluation for PR #$prNum ($head)" | Add-Content $logFile -Encoding utf8
+
+    $prevErr = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $agentOut = & $AgentApi new-conversation "--title=VictoryXCL PR #$prNum Gatekeeper" $singleLinePrompt 2>&1
+    $agentExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevErr
+
+    if ($agentOut) {
+        ($agentOut | Out-String).Trim() | Add-Content $logFile -Encoding utf8
+    }
+    "[$(Get-Date -Format o)] Finished PR #$prNum with exit $agentExit" | Add-Content $logFile -Encoding utf8
+
+    if ($agentExit -eq 0) {
+        $evaluated[$key] = [pscustomobject]@{ pr = $prNum; head = $head; decision = 'evaluated'; at = (Get-Date -Format o) }
+        $evaluated | ConvertTo-Json -Depth 4 | Set-Content $StateFile -Encoding utf8
+    } else {
+        Write-Warning "[pr-watcher] agentapi exited with $agentExit; NOT marking PR #$prNum as evaluated so it can retry."
+    }
 } finally {
     Remove-Item $LockFile -Force -ErrorAction SilentlyContinue
 }
