@@ -699,6 +699,37 @@ fn resolve_cpu_addr(va: usize) -> Option<usize> {
     }
 }
 
+/// True if every byte of `[addr, addr + len)` is committed and writable without faulting.
+unsafe fn is_writable(addr: usize, len: usize) -> bool {
+    use windows_sys::Win32::System::Memory::{
+        VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_EXECUTE_READWRITE,
+        PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_READWRITE, PAGE_WRITECOPY,
+    };
+    if len == 0 {
+        return true;
+    }
+    let writable = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    let mut cur = addr;
+    let end = addr.saturating_add(len);
+    while cur < end {
+        let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+        if VirtualQuery(cur as *const c_void, &mut mbi, std::mem::size_of_val(&mbi)) == 0
+            || mbi.RegionSize == 0
+            || mbi.State != MEM_COMMIT
+            || (mbi.Protect & PAGE_GUARD) != 0
+            || (mbi.Protect & writable) == 0
+        {
+            return false;
+        }
+        let next = (mbi.BaseAddress as usize).saturating_add(mbi.RegionSize);
+        if next <= cur {
+            return false;
+        }
+        cur = next;
+    }
+    true
+}
+
 /// Copy `src` into title memory at `dst`, resolving GPU-view aliases and ensuring lazy/guarded pages.
 unsafe fn copy_to_title(dst: usize, src: &[u8]) {
     if src.is_empty() {
@@ -709,8 +740,10 @@ unsafe fn copy_to_title(dst: usize, src: &[u8]) {
         && crate::hle::kernelx::mirrors::source(end - 1).is_none()
     {
         let _open = crate::hle::kernelx::lazy::ensure(dst, src.len());
-        std::ptr::copy_nonoverlapping(src.as_ptr(), dst as *mut u8, src.len());
-        return;
+        if is_writable(dst, src.len()) {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst as *mut u8, src.len());
+            return;
+        }
     }
     let mut at = dst;
     let mut off = 0usize;
@@ -719,7 +752,14 @@ unsafe fn copy_to_title(dst: usize, src: &[u8]) {
         let step = next - at;
         if let Some(cpu) = resolve_cpu_addr(at) {
             let _open = crate::hle::kernelx::lazy::ensure(cpu, step);
-            std::ptr::copy_nonoverlapping(src[off..].as_ptr(), cpu as *mut u8, step);
+            if is_writable(cpu, step) {
+                std::ptr::copy_nonoverlapping(src[off..].as_ptr(), cpu as *mut u8, step);
+            } else {
+                static LOGGED: std::sync::Once = std::sync::Once::new();
+                LOGGED.call_once(|| {
+                    crate::xlog_warn!("xg::copy_to_title: skipping non-writable target page at {cpu:#x} (title {at:#x})");
+                });
+            }
         }
         at = next;
         off += step;
@@ -736,8 +776,10 @@ unsafe fn copy_from_title(src: usize, dst: &mut [u8]) {
         && crate::hle::kernelx::mirrors::source(end - 1).is_none()
     {
         let _open = crate::hle::kernelx::lazy::ensure(src, dst.len());
-        std::ptr::copy_nonoverlapping(src as *const u8, dst.as_mut_ptr(), dst.len());
-        return;
+        if crate::gpu::shader::readable(src, dst.len()) {
+            std::ptr::copy_nonoverlapping(src as *const u8, dst.as_mut_ptr(), dst.len());
+            return;
+        }
     }
     let mut at = src;
     let mut off = 0usize;
@@ -746,7 +788,11 @@ unsafe fn copy_from_title(src: usize, dst: &mut [u8]) {
         let step = next - at;
         if let Some(cpu) = resolve_cpu_addr(at) {
             let _open = crate::hle::kernelx::lazy::ensure(cpu, step);
-            std::ptr::copy_nonoverlapping(cpu as *const u8, dst[off..].as_mut_ptr(), step);
+            if crate::gpu::shader::readable(cpu, step) {
+                std::ptr::copy_nonoverlapping(cpu as *const u8, dst[off..].as_mut_ptr(), step);
+            } else {
+                dst[off..off + step].fill(0);
+            }
         } else {
             dst[off..off + step].fill(0);
         }
@@ -768,10 +814,11 @@ unsafe extern "system" fn copy_into(p: *mut c_void, dst: *mut u8, plane: u32, su
         }
         let dst_at = dst.add(at as usize) as usize;
         let dst_len = t.size() as usize;
+        let _open = crate::hle::kernelx::lazy::ensure(dst_at, dst_len);
         if crate::hle::kernelx::mirrors::source(dst_at).is_none()
             && crate::hle::kernelx::mirrors::source(dst_at + dst_len.saturating_sub(1)).is_none()
+            && is_writable(dst_at, dst_len)
         {
-            let _open = crate::hle::kernelx::lazy::ensure(dst_at, dst_len);
             t.chain.tile_volume(std::slice::from_raw_parts_mut(dst_at as *mut u8, dst_len), i, &linear);
         } else {
             let mut tiled = vec![0u8; dst_len];
@@ -787,10 +834,11 @@ unsafe extern "system" fn copy_into(p: *mut c_void, dst: *mut u8, plane: u32, su
     }
     let slice_at = dst.add(at as usize + k * t.chain.slice_bytes) as usize;
     let slice_len = t.chain.slice_bytes;
+    let _open = crate::hle::kernelx::lazy::ensure(slice_at, slice_len);
     if crate::hle::kernelx::mirrors::source(slice_at).is_none()
         && crate::hle::kernelx::mirrors::source(slice_at + slice_len.saturating_sub(1)).is_none()
+        && is_writable(slice_at, slice_len)
     {
-        let _open = crate::hle::kernelx::lazy::ensure(slice_at, slice_len);
         let slice = std::slice::from_raw_parts_mut(slice_at as *mut u8, slice_len);
         t.chain.tile_level(slice, i, k, &linear);
     } else {
@@ -810,10 +858,11 @@ unsafe extern "system" fn copy_from(p: *mut c_void, dst: *mut u8, plane: u32, su
     if t.depth > 0 {
         let src_at = src.add(at as usize) as usize;
         let src_len = t.size() as usize;
+        let _open = crate::hle::kernelx::lazy::ensure(src_at, src_len);
         let linear = if crate::hle::kernelx::mirrors::source(src_at).is_none()
             && crate::hle::kernelx::mirrors::source(src_at + src_len.saturating_sub(1)).is_none()
+            && crate::gpu::shader::readable(src_at, src_len)
         {
-            let _open = crate::hle::kernelx::lazy::ensure(src_at, src_len);
             t.chain.detile_volume(std::slice::from_raw_parts(src_at as *const u8, src_len), i)
         } else {
             let mut tiled = vec![0u8; src_len];
@@ -828,10 +877,11 @@ unsafe extern "system" fn copy_from(p: *mut c_void, dst: *mut u8, plane: u32, su
     }
     let slice_at = src.add(at as usize + k * t.chain.slice_bytes) as usize;
     let slice_len = t.chain.slice_bytes;
+    let _open = crate::hle::kernelx::lazy::ensure(slice_at, slice_len);
     let linear = if crate::hle::kernelx::mirrors::source(slice_at).is_none()
         && crate::hle::kernelx::mirrors::source(slice_at + slice_len.saturating_sub(1)).is_none()
+        && crate::gpu::shader::readable(slice_at, slice_len)
     {
-        let _open = crate::hle::kernelx::lazy::ensure(slice_at, slice_len);
         t.chain.detile_level(std::slice::from_raw_parts(slice_at as *const u8, slice_len), i, k)
     } else {
         let mut tiled = vec![0u8; slice_len];
@@ -982,6 +1032,21 @@ mod tests {
             crate::hle::kernelx::mirrors::released(cpu);
             VirtualFree(gpu as *mut c_void, 0, MEM_RELEASE);
             VirtualFree(cpu as *mut c_void, 0, MEM_RELEASE);
+        }
+    }
+
+    #[test]
+    fn copy_to_title_skips_uncommitted_reserved_page_without_crashing() {
+        use windows_sys::Win32::System::Memory::{VirtualAlloc, VirtualFree, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE};
+        unsafe {
+            let reserved = VirtualAlloc(std::ptr::null(), 2 * TILE_BYTES, MEM_RESERVE, PAGE_READWRITE) as usize;
+            assert!(reserved != 0);
+            let data = vec![0xAAu8; 4096];
+            copy_to_title(reserved + 0x100, &data);
+            let mut out = vec![0x55u8; 4096];
+            copy_from_title(reserved + 0x100, &mut out);
+            assert!(out.iter().all(|&b| b == 0));
+            VirtualFree(reserved as *mut c_void, 0, MEM_RELEASE);
         }
     }
 }
