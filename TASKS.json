@@ -1,0 +1,99 @@
+{
+  "project": "VictoryXCL",
+  "repo": "CarlosB456/VictoryXCL",
+  "target_hardware": {
+    "gpu": "AMD Radeon RX 6600 (8 GB VRAM, RDNA2)",
+    "ram": "16 GB DDR4",
+    "os": "Windows 10 x64",
+    "device_type": "lockhart",
+    "target_fps": 30
+  },
+  "baseline": {
+    "commit": "cc255b5",
+    "observed_fps_steady": "29.8-30.0",
+    "observed_fps_dips": "6.9-15.5 during heavy streaming/cold PSO bursts",
+    "observed_write_watch_ms_at_2048_submits": 22328,
+    "observed_lock_wait_ms_at_2048_submits": 2438
+  },
+  "tasks": [
+    {
+      "id": "perf-write-watch-stretch",
+      "title": "Reduce GetWriteWatch overhead via in-place GPU-view stretch mapping",
+      "level": "hard",
+      "points": 100,
+      "status": "open",
+      "target_files": [
+        "crates/xcl/src/hle/d3d12x/title_textures.rs",
+        "crates/xcl/src/hle/kernelx.rs",
+        "crates/xcl/src/gpu/uma.rs"
+      ],
+      "problem": "xcl.log shows 22,328 ms spent in write-watch scanning and 2,438 ms in lock wait across 32,768 GPU-view textures by 2,048 submits.",
+      "acceptance": "Lower write-watch ms and lock wait ms in timed smoke run while maintaining 0 crashes and >= baseline FPS."
+    },
+    {
+      "id": "perf-retire-copies",
+      "title": "Retire replaced buffer/texture copies via GPU fences instead of immediate Drop",
+      "level": "solid",
+      "points": 60,
+      "status": "open",
+      "target_files": [
+        "crates/xcl/src/hle/d3d12x/vram.rs",
+        "crates/xcl/src/hle/d3d12x/title_textures.rs",
+        "crates/xcl/src/hle/d3d12x/real.rs"
+      ],
+      "problem": "Dropping replaced host resource copies before in-flight GPU command lists complete can cause flickering/artifacts (pattern seen in Belobug/VIctory-Belobug-AMD commit 40b8b9b5).",
+      "acceptance": "Retire superseded copies behind queue fences with unit tests proving deferred release until fence completion."
+    },
+    {
+      "id": "perf-bitcode-cleanup",
+      "title": "Add safe dead-code and algebraic clean-up passes over translated shaders before DXC",
+      "level": "hard",
+      "points": 80,
+      "status": "open",
+      "target_files": [
+        "crates/xcl/src/gpu/recomp/"
+      ],
+      "problem": "Large shaders trigger heavy DXC and AMD driver PSO compile spikes (xcl-dxc-* and amdxc64.dll) that dip FPS from 30.0 to 7-15 fps and pressure 16 GB system commit.",
+      "acceptance": "Pass all recomp/shader unit tests, reduce emitted DXIL/HLSL size and compile time without changing shader semantics."
+    },
+    {
+      "id": "perf-resubmit-wait",
+      "title": "Eliminate command-list resubmit GPU stalls by rotating PC command lists/allocators",
+      "level": "solid",
+      "points": 65,
+      "status": "open",
+      "target_files": [
+        "crates/xcl/src/hle/d3d12x/alloc_pool.rs",
+        "crates/xcl/src/hle/d3d12x/real.rs"
+      ],
+      "problem": "xcl.log logs #256-#512 occurrences of 'a command list is submitted while its previous submit is still on the GPU' causing submit waits up to 2.6 ms.",
+      "acceptance": "Reduce or eliminate resubmit waits cleanly without triggering D3D12 debug layer ID 553 or device removal."
+    },
+    {
+      "id": "compat-cmdlist10-slot101",
+      "title": "Investigate and implement ID3D12GraphicsCommandList10::#101 and CopyMemoryToMemoryX non-UMA path",
+      "level": "solid",
+      "points": 50,
+      "status": "open",
+      "target_files": [
+        "crates/xcl/src/hle/d3d12x/list_x.rs",
+        "crates/xcl/src/hle/d3d12x/real.rs"
+      ],
+      "problem": "xcl.log reports first stub call '[STUB] d3d12_xs.dll!ID3D12GraphicsCommandList10::#101 (not on PC)' and skipped CopyMemoryToMemoryX calls outside UMA.",
+      "acceptance": "Properly handle or verify the slot/copy semantics with unit tests and 0 regressions."
+    },
+    {
+      "id": "perf-texture-min-lod",
+      "title": "Support optional ResourceMinLODClamp on placed texture views for 8 GB VRAM GPUs",
+      "level": "warmup",
+      "points": 35,
+      "status": "open",
+      "target_files": [
+        "crates/xcl/src/hle/d3d12x/title_textures.rs",
+        "crates/xcl/src/hle/d3d12x/vram.rs"
+      ],
+      "problem": "Streaming 32,768+ placed textures strains 8 GB VRAM and 16 GB RAM commit; a configurable MinLOD clamp env var reduces memory spikes.",
+      "acceptance": "Configurable env flag (off or safe default) with unit tests verifying SRV MinLODClamp handling."
+    }
+  ]
+}

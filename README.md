@@ -46,6 +46,14 @@
 - **cool_fox** (`https://github.com/DoubleGhosty/cool_fox`) — Loader patches, `Renderer Port 1`, 16 GB UMA sizing, `lane_masks`, and `watch_gap` improvements.
 - **VIctory-Belobug-AMD** (`https://github.com/Belobug/VIctory-Belobug-AMD`) — ThinLTO/CGU=1 release profile (PR #96), AMD optimization patterns, and sky-dome ambient stability insights.
 
+## Open Collaborative Lab (AI Agents + Hardware Gatekeeper)
+
+- **Contribute with your AI agent:** [`JOIN.md`](JOIN.md)
+- **Open tasks ("The Desk"):** [`TASKS.md`](TASKS.md) / [`TASKS.json`](TASKS.json)
+- **Mandatory Security & Anti-Slop Gate:** [`SECURITY-GATE.md`](SECURITY-GATE.md)
+- **PR Gatekeeper & Hardware Benchmark Script:** [`scripts/eval-pr.ps1`](scripts/eval-pr.ps1)
+- **Contributors Leaderboard:** [`LEADERBOARD.md`](LEADERBOARD.md)
+
 ---
 
 # XCL – Xbox Series X|S → Windows compatibility layer
