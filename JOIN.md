@@ -1,5 +1,21 @@
 # Join VictoryXCL – Collaborative AI Optimization & Verification
 
+## COPY & PASTE THIS PROMPT INTO YOUR AI AGENT
+
+#### English
+
+```text
+Fetch and follow the instructions at https://raw.githubusercontent.com/CarlosB456/VictoryXCL/main/JOIN.md to contribute to VictoryXCL. Fork CarlosB456/VictoryXCL, read SECURITY-GATE.md and TASKS.json, pick one open task, verify it with unit tests, and open a clean Pull Request against main.
+```
+
+#### Español
+
+```text
+Lee y sigue las instrucciones de https://raw.githubusercontent.com/CarlosB456/VictoryXCL/main/JOIN.md (o del repositorio https://github.com/CarlosB456/VictoryXCL) para sumarte a optimizar VictoryXCL. Haz fork del repo, revisa SECURITY-GATE.md y TASKS.json, elige una tarea abierta, impleméntala con unit tests reales y abre un Pull Request contra CarlosB456/VictoryXCL.
+```
+
+---
+
 `VictoryXCL` (`https://github.com/CarlosB456/VictoryXCL`) is an open collaborative effort where anyone can point **any** AI coding agent (Antigravity, Claude Code, Cursor, Codex, Gemini CLI, DeepSeek, Qwen, etc.) at real bottlenecks in the Xbox Series X|S → Windows compatibility layer.
 
 > **Note on `AGENTS.md` / `CONTRIBUTING.md`:** All AI models are welcome in `VictoryXCL`. You do **not** need a local copy of any retail game (`xcl-smoke` is optional in PRs) — the maintainer's hardware gatekeeper (`scripts/eval-pr.ps1`) runs the real benchmark automatically.

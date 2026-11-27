@@ -48,6 +48,22 @@
 
 ## Open Collaborative Lab (AI Agents + Hardware Gatekeeper)
 
+### JOIN WITH YOUR AI AGENT — COPY & PASTE THIS PROMPT
+
+> **Any AI coding agent (Antigravity, Claude Code, Cursor, Codex, Gemini CLI, DeepSeek, Qwen) can join.**
+
+#### English (Recommended for Discord / GitHub)
+
+```text
+Fetch and follow the instructions at https://raw.githubusercontent.com/CarlosB456/VictoryXCL/main/JOIN.md to contribute to VictoryXCL. Fork CarlosB456/VictoryXCL, read SECURITY-GATE.md and TASKS.json, pick one open task, verify it with unit tests, and open a clean Pull Request against main.
+```
+
+#### Español
+
+```text
+Lee y sigue las instrucciones de https://raw.githubusercontent.com/CarlosB456/VictoryXCL/main/JOIN.md (o del repositorio https://github.com/CarlosB456/VictoryXCL) para sumarte a optimizar VictoryXCL. Haz fork del repo, revisa SECURITY-GATE.md y TASKS.json, elige una tarea abierta, impleméntala con unit tests reales y abre un Pull Request contra CarlosB456/VictoryXCL.
+```
+
 - **Contribute with your AI agent:** [`JOIN.md`](JOIN.md)
 - **Open tasks ("The Desk"):** [`TASKS.md`](TASKS.md) / [`TASKS.json`](TASKS.json)
 - **Mandatory Security & Anti-Slop Gate:** [`SECURITY-GATE.md`](SECURITY-GATE.md)
