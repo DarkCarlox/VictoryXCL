@@ -176,6 +176,51 @@
       ],
       "problem": "Streaming 32,768+ placed textures strains 8 GB VRAM and 16 GB RAM commit; a configurable MinLOD clamp env var reduces memory spikes.",
       "acceptance": "Configurable env flag with unit tests verifying SRV MinLODClamp handling."
+    },
+    {
+      "id": "perf-ram-footprint",
+      "category": "RAM / Commit Reduction",
+      "title": "Reduce total host RAM and commit footprint across caches, DXC/PSO pools, and staging buffers",
+      "level": "hard",
+      "points": 85,
+      "status": "open",
+      "target_files": [
+        "crates/xcl/src/gpu/uma.rs",
+        "crates/xcl/src/hle/d3d12x/pso_async.rs",
+        "crates/xcl/src/shaders.rs"
+      ],
+      "problem": "Combined host RAM + commit from UMA coherent windows, DXC/PSO compiler heaps, and shader caches leaves tight headroom on 16 GB systems.",
+      "acceptance": "Measurable reduction in peak commit and working set RAM in smoke runs with 0 OOM or regression."
+    },
+    {
+      "id": "perf-cpu-gpu-balance",
+      "category": "CPU / GPU Balance",
+      "title": "Balance CPU and GPU workloads properly to prevent CPU bottlenecks and GPU starvation",
+      "level": "solid",
+      "points": 70,
+      "status": "open",
+      "target_files": [
+        "crates/xcl/src/hle/d3d12x/real.rs",
+        "crates/xcl/src/hle/d3d12x/sparse.rs",
+        "crates/xcl/src/hle/d3d12x/pso_async.rs"
+      ],
+      "problem": "Background DXC/PSO threads, CPU-side detiling/write-watch, and queue waits can starve either the render CPU thread or the GPU.",
+      "acceptance": "Better CPU/GPU utilization balance and higher sustained FPS without increasing frame pacing jitter."
+    },
+    {
+      "id": "compat-multi-hardware",
+      "category": "Multi-Hardware Compatibility",
+      "title": "Improve compatibility across diverse GPUs and CPUs (AMD RDNA2/3/4, NVIDIA Wave32, Intel Arc, older CPUs)",
+      "level": "hard",
+      "points": 90,
+      "status": "open",
+      "target_files": [
+        "crates/xcl/src/gpu/recomp/",
+        "crates/xcl/src/hle/kernelx/",
+        "crates/xcl/src/hle/d3d12x/real.rs"
+      ],
+      "problem": "Different user GPUs (Wave32 vs Wave64, varying VRAM sizes, driver PSO behavior) and CPUs lacking console instructions (e.g. Insertq) hit edge cases.",
+      "acceptance": "Cleaner fallbacks, Wave32/64 and CPU instruction compatibility, and vendor-safe defaults backed by unit tests."
     }
   ]
 }

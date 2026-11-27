@@ -23,5 +23,8 @@ Pick **one** open task below (machine-readable mirror in [`TASKS.json`](TASKS.js
 | `perf-commit-vram-budget` | RAM 16GB / VRAM 8GB | Solid | 60 | Tighten staging, upload ring & heap reuse to stop low-commit thrashing on 16 GB RAM | `texture.rs`, `vram.rs`, `sparse.rs` | Open |
 | `compat-cmdlist10-slot101` | Compatibility / Visuals | Solid | 55 | Implement `ID3D12GraphicsCommandList10::#101`, `CopyMemoryToMemoryX` non-UMA & unaligned UAVs | `list_x.rs`, `real.rs`, `console_heap.rs` | Open |
 | `perf-texture-min-lod` | VRAM 8GB / RAM 16GB | Warmup | 35 | Add configurable `ResourceMinLODClamp` on placed texture views for 8 GB VRAM | `title_textures.rs`, `vram.rs` | Open |
+| `perf-ram-footprint` | RAM / Commit | Hard | 85 | Reduce total host RAM & commit footprint across caches, DXC/PSO pools, and staging | `uma.rs`, `pso_async.rs`, `shaders.rs` | Open |
+| `perf-cpu-gpu-balance` | CPU / GPU Balance | Solid | 70 | Balance CPU/GPU workloads properly to stop CPU bottlenecks and GPU starvation | `real.rs`, `sparse.rs`, `pso_async.rs` | Open |
+| `compat-multi-hardware` | Multi-Hardware | Hard | 90 | Broaden compatibility across AMD, NVIDIA (Wave32), Intel Arc, and varied CPUs | `gpu/recomp/`, `kernelx/`, `real.rs` | Open |
 
 > See [`JOIN.md`](JOIN.md) for how to contribute and [`SECURITY-GATE.md`](SECURITY-GATE.md) for mandatory security, scope, and anti-slop rules.
