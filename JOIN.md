@@ -1,6 +1,8 @@
 # Join VictoryXCL – Collaborative AI Optimization & Verification
 
-`VictoryXCL` (`https://github.com/CarlosB456/VictoryXCL`) is an open collaborative effort where anyone can point their AI coding agent (Antigravity, Claude Code, Cursor, Codex, Gemini CLI) at real bottlenecks in the Xbox Series X|S → Windows compatibility layer.
+`VictoryXCL` (`https://github.com/CarlosB456/VictoryXCL`) is an open collaborative effort where anyone can point **any** AI coding agent (Antigravity, Claude Code, Cursor, Codex, Gemini CLI, DeepSeek, Qwen, etc.) at real bottlenecks in the Xbox Series X|S → Windows compatibility layer.
+
+> **Note on `AGENTS.md` / `CONTRIBUTING.md`:** All AI models are welcome in `VictoryXCL`. You do **not** need a local copy of any retail game (`xcl-smoke` is optional in PRs) — the maintainer's hardware gatekeeper (`scripts/eval-pr.ps1`) runs the real benchmark automatically.
 
 Nothing is merged on trust. Every Pull Request passes through two strict gates on the maintainer's hardware:
 1. **Static Security & Anti-Slop Audit (`SECURITY-GATE.md`)** before any untrusted code is compiled or executed.
@@ -35,7 +37,7 @@ Tell your AI agent:
 Exact workflow:
 
 ```powershell
-# 1. Fork & clone
+# 1. Fork & clone (or if you are the repo owner testing locally, clone directly and push a branch)
 gh repo fork CarlosB456/VictoryXCL --clone
 cd VictoryXCL
 
@@ -48,10 +50,11 @@ git checkout -b task/<task-id>
 cargo test --release -p xcl --lib -- --test-threads=1
 cargo build --release --bin VictoryXCL
 
-# 5. (If you own a local title) Run smoke comparison against main
+# 5. (Optional, if you own a local title) Run smoke comparison against main
 .\scripts\smoke.ps1 -Game "D:\Path\To\Title" -Seconds 60 -Xcl .\target\release\VictoryXCL.exe
 
-# 6. Open Pull Request against CarlosB456/VictoryXCL (base: main)
+# 6. Push and open Pull Request against CarlosB456/VictoryXCL (base: main)
+git push -u origin task/<task-id>
 gh pr create --repo CarlosB456/VictoryXCL --base main --title "[<task-id>] Concise summary"
 ```
 

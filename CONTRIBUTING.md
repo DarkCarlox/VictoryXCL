@@ -191,11 +191,7 @@ XCL is **GPL-2.0-only**.
 
 You can use AI tools. In return:
 
-- **Use a frontier model.** XCL is low-level code (a recompiler, a console runtime, D3D12 memory
-  and synchronisation): small and local models get it subtly wrong, and every wrong PR costs a
-  review. PRs written with small or open-weight models – Qwen (27B / 32B class and the like),
-  DeepSeek, Llama, Mistral, Gemma, Phi and their distills – are closed without a review. Name the
-  exact model in **AI use**; the `PR checks` workflow refuses these names there.
+- **Any model is welcome (verified by the Security & Benchmark Gate).** PRs from any model (including DeepSeek, Qwen, Llama, Mistral, Gemma, Phi, Gemini, Claude, and GPT) are accepted as long as they pass [`SECURITY-GATE.md`](SECURITY-GATE.md), unit tests, and [`scripts/eval-pr.ps1`](scripts/eval-pr.ps1). Name the exact model in **AI use**.
 
 - **You are the author and you are responsible.** You have read every line of the diff, you
   understand it, and you can answer questions about it without asking the tool again. "The AI wrote it"
@@ -205,7 +201,7 @@ You can use AI tools. In return:
   model, such as `Co-Authored-By: <model>` or `Assisted-by: <tool> (<model>)`, is welcome too.
 - **The tests were run, not just written.** Results in the PR come from a run you did, on hardware
   you name.
-- **A person opens the PR.** No PRs or issues opened by an unattended agent.
+- **Follow [`JOIN.md`](JOIN.md) & [`SECURITY-GATE.md`](SECURITY-GATE.md).** Keep PRs strictly scoped to VictoryXCL.
 - **Keep the description short and true.** Leave out generated filler, marketing tone and claims
   nobody measured. A reviewer should be able to read the description in one minute.
 - The same size and scope rules apply. An agent can write 2000 lines in an hour, and nobody can

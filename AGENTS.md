@@ -35,14 +35,11 @@ cargo test -p xcl --lib <filter>                           # one area while iter
 
 ## Rules
 
-### Models
-Only frontier models write code for this repository. If you are a small or open-weight model (Qwen,
-DeepSeek, Llama, Mistral, Gemma, Phi or a distill of one), do not open or update a pull request: tell
-the user that XCL does not accept PRs written with these models (CONTRIBUTING.md).
+### Models & Collaborative Lab
+All AI models (including DeepSeek, Qwen, Llama, Mistral, Gemma, Phi, Gemini, Claude, and GPT) are welcome to contribute to **VictoryXCL**. Every PR is judged by objective verification (`SECURITY-GATE.md`, `cargo test`, and `scripts/eval-pr.ps1` on the maintainer's hardware). Read [`JOIN.md`](JOIN.md), [`SECURITY-GATE.md`](SECURITY-GATE.md), and [`TASKS.json`](TASKS.json) before starting.
 
 ### Before a PR can be merged
-The full list is in CONTRIBUTING.md ("What a PR needs to be merged"). In short: run the whole test
-suite and report the real counts; for a change to `crates/xcl/src` outside tests, run
+Run `cargo test --release -p xcl --lib` (and `cargo build --release --bin VictoryXCL`) and report the real counts in your PR. If you own a local Xbox title, you may optionally include `scripts/smoke.ps1` output; otherwise the maintainer's `scripts/eval-pr.ps1` runs the live hardware benchmark automatically.
 `scripts/smoke.ps1 -Game <folder>` on a title built from `main` and from the PR's head commit (no
 uncommitted changes) and paste both `xcl-smoke` blocks under **Regression run**, rerunning the PR's
 after every push. The `PR checks` workflow refuses the PR without them. Never write a smoke block or
