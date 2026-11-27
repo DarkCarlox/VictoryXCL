@@ -1767,6 +1767,63 @@ pub(crate) fn prepare_for_launch(root: &Path, progress: &LaunchPreparation) -> R
     Ok(())
 }
 
+/// A pack's prepared record numbers depend on its bytes and the translation configuration.
+fn prepared_pack_signature(data: &[u8], translation: u64, windows: u32, split: bool, graphics_split: bool) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    (translation, windows, split, graphics_split).hash(&mut h);
+    h.write(data);
+    h.finish()
+}
+
+struct PreparedBitset {
+    path: PathBuf,
+    sig: u64,
+    bytes: Vec<std::sync::atomic::AtomicU8>,
+    save_lock: Mutex<()>,
+}
+impl PreparedBitset {
+    fn load_or_new(dir: &Path, n: usize, sig: u64) -> Self {
+        let path = dir.join(format!("prepared-records-v2-{sig:016x}.bin"));
+        let byte_len = n.div_ceil(8);
+        let mut raw = vec![0u8; byte_len];
+        if let Ok(data) = std::fs::read(&path) {
+            if data.len() == 8 + byte_len && data[..8] == sig.to_le_bytes() {
+                raw.copy_from_slice(&data[8..]);
+            }
+        }
+        let bytes = raw.into_iter().map(std::sync::atomic::AtomicU8::new).collect();
+        Self { path, sig, bytes, save_lock: Mutex::new(()) }
+    }
+    fn is_done(&self, i: usize) -> bool {
+        (self.bytes[i / 8].load(Ordering::Relaxed) & (1u8 << (i % 8))) != 0
+    }
+    fn finish(&self, i: usize, prepared: bool) {
+        if prepared {
+            self.bytes[i / 8].fetch_or(1u8 << (i % 8), Ordering::Relaxed);
+        }
+    }
+    fn count_done(&self, n: usize) -> usize {
+        (0..n).filter(|&i| self.is_done(i)).count()
+    }
+    fn save(&self) {
+        let Ok(_g) = self.save_lock.try_lock() else { return };
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut out = Vec::with_capacity(8 + self.bytes.len());
+        out.extend_from_slice(&self.sig.to_le_bytes());
+        for b in &self.bytes {
+            out.push(b.load(Ordering::Relaxed));
+        }
+        let tmp = self.path.with_extension(format!("{}.tmp", std::process::id()));
+        if std::fs::write(&tmp, &out).is_ok() {
+            let _ = std::fs::rename(&tmp, &self.path);
+        }
+    }
+}
+
 fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, only: Option<&str>, pipelines: bool, used: Option<&std::collections::HashSet<u64>>, t0: std::time::Instant, startup: Option<&LaunchPreparation>) -> Result<(), String> {
     let pipelines = if pipelines {
         let mut p = Pipelines::for_adapter(startup.map_or("auto", |p| p.adapter.as_str()))
@@ -1803,54 +1860,16 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
     let startup_device = pipelines.filter(|_| startup.is_some());
     let graphics_split = split.unwrap_or_else(|| startup_device.map_or_else(recomp::runner::graphics_wave32, |p| recomp::pso::graphics_wave32_for_device(&p.dev)));
     let split = split.unwrap_or_else(|| startup_device.map_or_else(|| recomp::pso::split_wave64_forced() || recomp::runner::wave64_supported().is_ok_and(|w| !w), |p| recomp::pso::wave32_only_for_device(&p.dev)));
-    struct PreparedBitset {
-        path: PathBuf,
-        sig: u64,
-        bytes: Vec<std::sync::atomic::AtomicU8>,
-        save_lock: Mutex<()>,
-    }
-    impl PreparedBitset {
-        fn load_or_new(n: usize, sig: u64) -> Self {
-            let path = recomp::dxc::cache_dir().join("prepared-records-v1.bin");
-            let byte_len = n.div_ceil(8);
-            let mut raw = vec![0u8; byte_len];
-            if let Ok(data) = std::fs::read(&path) {
-                if data.len() == 8 + byte_len && data[..8] == sig.to_le_bytes() {
-                    raw.copy_from_slice(&data[8..]);
-                }
-            }
-            let bytes = raw.into_iter().map(std::sync::atomic::AtomicU8::new).collect();
-            Self { path, sig, bytes, save_lock: Mutex::new(()) }
+    let persist = match input {
+        Input::Pack { data, .. } if bg && limit == usize::MAX && only.is_none() && used.is_none() => {
+            let identity = recomp::pso::preparation_cache_identity();
+            (identity != 0).then(|| {
+                let sig = prepared_pack_signature(data, identity, windows, split, graphics_split);
+                PreparedBitset::load_or_new(&recomp::dxc::cache_dir(), n, sig)
+            })
         }
-        fn is_done(&self, i: usize) -> bool {
-            (self.bytes[i / 8].load(Ordering::Relaxed) & (1u8 << (i % 8))) != 0
-        }
-        fn mark_done(&self, i: usize) {
-            self.bytes[i / 8].fetch_or(1u8 << (i % 8), Ordering::Relaxed);
-        }
-        fn count_done(&self, n: usize) -> usize {
-            (0..n).filter(|&i| self.is_done(i)).count()
-        }
-        fn save(&self) {
-            let Ok(_g) = self.save_lock.try_lock() else { return };
-            if let Some(parent) = self.path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let mut out = Vec::with_capacity(8 + self.bytes.len());
-            out.extend_from_slice(&self.sig.to_le_bytes());
-            for b in &self.bytes {
-                out.push(b.load(Ordering::Relaxed));
-            }
-            let tmp = self.path.with_extension("bin.tmp");
-            if std::fs::write(&tmp, &out).is_ok() {
-                let _ = std::fs::rename(&tmp, &self.path);
-            }
-        }
-    }
-    let persist = (startup.is_some() && limit == usize::MAX && only.is_none() && used.is_none()).then(|| {
-        let sig = crate::gpu::shader::fnv64(format!("{n}:{windows}:{split}:{graphics_split}:v1").as_bytes());
-        PreparedBitset::load_or_new(n, sig)
-    });
+        _ => None,
+    };
     if let Some(ps) = &persist {
         let already = ps.count_done(n);
         if already > 0 {
@@ -1887,10 +1906,6 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
         for _ in 0..threads {
             s.spawn(|| loop {
                 if startup.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) { break; }
-                while bg && !startup.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) && crate::hle::d3d12x::pso_async::should_yield_background() {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                if startup.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) { break; }
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 if i >= n {
                     break;
@@ -1898,9 +1913,13 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
                 if persist.as_ref().is_some_and(|ps| ps.is_done(i)) {
                     continue;
                 }
-                let record_done = || {
+                while bg && !startup.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) && crate::hle::d3d12x::pso_async::should_yield_background() {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                if startup.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) { break; }
+                let record_done = |prepared| {
                     if let Some(ps) = &persist {
-                        ps.mark_done(i);
+                        ps.finish(i, prepared);
                     }
                     let d = done.fetch_add(1, Ordering::Relaxed) + 1;
                     if let Some(p) = startup { p.done.fetch_add(1, Ordering::Relaxed); }
@@ -1916,18 +1935,18 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
                 let (name, blob) = input.get(i);
                 let Some(blob) = blob else {
                     if startup.is_some() { failed.fetch_add(1, Ordering::Relaxed); }
-                    record_done();
+                    record_done(false);
                     continue;
                 };
                 let Some(sh) = xbox::parse(&blob) else {
                     if startup.is_some() && !matches!(shader::classify(&blob).0, shader::Kind::Dxil | shader::Kind::Dxbc) {
                         failed.fetch_add(1, Ordering::Relaxed);
                     }
-                    record_done();
+                    record_done(false);
                     continue;
                 };
                 if only.is_some_and(|o| !sh.stage.eq_ignore_ascii_case(o)) {
-                    record_done();
+                    record_done(false);
                     continue;
                 }
                 // a compute program as a title's pipeline translates it (`pso::console_to_dxil_in`):
@@ -1935,16 +1954,16 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
                 if sh.fssm.iter().any(|f| matches!(recomp::interface(&blob, &sh, f), Some(recomp::Mode::Compute(_)))) {
                     if used.is_some_and(|u| !used_compute(&blob, u)) {
                         unused.fetch_add(1, Ordering::Relaxed);
-                        record_done();
+                        record_done(false);
                         continue;
                     }
                     if crate::hle::d3d12x::real::rt_gated_compute_held(&blob) {
                         rt_gated.fetch_add(1, Ordering::Relaxed);
-                        record_done();
+                        record_done(false);
                         continue;
                     }
                     let record = crate::gpu::shader::fnv64(&blob);
-                    match recomp::pso::console_to_dxil_in(&blob, recomp::pso::Stage::Compute, 0, split, windows) {
+                    let prepared = match recomp::pso::console_to_dxil_in(&blob, recomp::pso::Stage::Compute, 0, split, windows) {
                         Ok(c) => {
                             if let Some(p) = pipelines {
                                 p.make_record(&c, record);
@@ -1952,19 +1971,23 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
                                     p.make_one(&c.dxil, &c.samplers, true, None, record);
                                 }
                             }
-                            compiled.fetch_add(1, Ordering::Relaxed)
+                            compiled.fetch_add(1, Ordering::Relaxed);
+                            true
                         }
                         Err(e) => {
                             let mut g = errors.lock().unwrap();
                             if g.len() < 10 {
                                 g.push(format!("{name}: {}", e.lines().find(|l| l.contains("error")).unwrap_or(e.lines().next().unwrap_or(""))));
                             }
-                            failed.fetch_add(1, Ordering::Relaxed)
+                            failed.fetch_add(1, Ordering::Relaxed);
+                            false
                         }
                     };
-                    record_done();
+                    record_done(prepared);
                     continue;
                 }
+                let mut complete = true;
+                let mut compiled_any = false;
                 for f in &sh.fssm {
                     let Some(mode) = recomp::interface(&blob, &sh, f) else { continue };
                     let jobs: Vec<(&str, Option<String>)> = match &mode {
@@ -1987,6 +2010,7 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
                             Ok(t) if t.complete() => t,
                             Ok(_) => {
                                 if startup.is_some() { skipped.fetch_add(1, Ordering::Relaxed); }
+                                complete = false;
                                 continue;
                             }
                             Err(e) => {
@@ -1995,25 +2019,30 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
                                     let mut logs = errors.lock().unwrap();
                                     if logs.len() < 10 { logs.push(format!("{name}: {e}")); }
                                 }
+                                complete = false;
                                 continue;
                             }
                         };
                         for (profile, src) in &jobs {
                             match recomp::dxc::compile_cached(src.as_deref().unwrap_or(&t.hlsl), "main", profile) {
-                                Ok((_, true)) => cached.fetch_add(1, Ordering::Relaxed),
-                                Ok(_) => compiled.fetch_add(1, Ordering::Relaxed),
+                                Ok((_, hit)) => {
+                                    let count = if hit { &cached } else { &compiled };
+                                    compiled_any = true;
+                                    count.fetch_add(1, Ordering::Relaxed);
+                                }
                                 Err(e) => {
+                                    complete = false;
                                     let mut g = errors.lock().unwrap();
                                     if g.len() < 10 {
                                         g.push(format!("{name}: {}", e.lines().find(|l| l.contains("error")).unwrap_or("")));
                                     }
-                                    failed.fetch_add(1, Ordering::Relaxed)
+                                    failed.fetch_add(1, Ordering::Relaxed);
                                 }
                             };
                         }
                     }
                 }
-                record_done();
+                record_done(complete && compiled_any);
             });
         }
     });
@@ -2404,6 +2433,54 @@ fn print(path: &Path, what: &str, agg: Agg, top: usize, json: bool, t0: std::tim
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn prepared_pack_signature_checks_contents_and_configuration() {
+        let original = b"pack bytes A";
+        let sig = prepared_pack_signature(original, 7, 4, false, true);
+        assert_eq!(sig, prepared_pack_signature(original, 7, 4, false, true));
+        for other in [
+            prepared_pack_signature(b"pack bytes B", 7, 4, false, true),
+            prepared_pack_signature(original, 8, 4, false, true),
+            prepared_pack_signature(original, 7, 2, false, true),
+            prepared_pack_signature(original, 7, 4, true, true),
+            prepared_pack_signature(original, 7, 4, false, false),
+        ] {
+            assert_ne!(sig, other);
+        }
+    }
+
+    #[test]
+    fn prepared_pack_checkpoint_retries_failures_and_keeps_packs_separate() {
+        struct Temp(PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = Temp(std::env::temp_dir().join(format!("xcl-prepared-pack-{}-{nonce}", std::process::id())));
+        let a = prepared_pack_signature(b"pack A", 1, 4, false, true);
+        let b = prepared_pack_signature(b"pack B", 1, 4, false, true);
+
+        let first = PreparedBitset::load_or_new(&dir.0, 3, a);
+        first.finish(0, true);
+        first.finish(1, false);
+        first.save();
+        let second = PreparedBitset::load_or_new(&dir.0, 3, b);
+        assert_eq!(second.count_done(3), 0);
+        second.finish(2, true);
+        second.save();
+
+        let first = PreparedBitset::load_or_new(&dir.0, 3, a);
+        assert!(first.is_done(0));
+        assert!(!first.is_done(1));
+        assert!(!first.is_done(2));
+        first.finish(1, true);
+        first.save();
+        assert_eq!(PreparedBitset::load_or_new(&dir.0, 3, a).count_done(3), 2);
+        assert_eq!(PreparedBitset::load_or_new(&dir.0, 3, b).count_done(3), 1);
+    }
+
     /// `--used-only` keeps a compute program exactly when the runtime noted its pipeline: the
     /// key of a pipeline of that one shader, as `real::shaders_key` makes it.
     #[test]

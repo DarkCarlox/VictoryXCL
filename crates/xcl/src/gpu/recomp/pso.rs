@@ -176,6 +176,11 @@ pub fn console_to_dxil_in(blob: &[u8], stage: Stage, sampler_base: u32, split_wa
     cached_shader(shader_cache(), key, blob, from_disk).map(|shader| shader.as_ref().clone())
 }
 
+/// Identifies the disk translations that startup shader preparation can reuse.
+pub(crate) fn preparation_cache_identity() -> u64 {
+    translated::identity()
+}
+
 /// Translations on disk: a console program's (DXIL, static samplers) by its bytes, so a run
 /// does not translate again what an earlier run of the same XCL build translated. The DXIL
 /// cache is keyed by the generated HLSL, so it needs the translation first: a retail game's
@@ -250,7 +255,7 @@ mod translated {
 
     /// Translation semantics and the DXC DLLs, independent of link metadata and build profile.
     /// Zero means the disk cache is disabled.
-    fn identity() -> u64 {
+    pub(super) fn identity() -> u64 {
         static I: OnceLock<u64> = OnceLock::new();
         *I.get_or_init(|| {
             if std::env::var("XCL_TRANSLATED_CACHE").is_ok_and(|v| v == "0") {

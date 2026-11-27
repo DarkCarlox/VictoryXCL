@@ -30,7 +30,7 @@
 ## Fusion Architecture & Key Technologies
 
 - **Base Engine & RDNA2 → DXIL Recompiler (`xcl-dev/xcl` `amd-dev` + `main`):** Native x64 execution with HLE `kernelx`, `d3d12_xs`, `xg`, `DirectStorage`, `xapu`, and RDNA2→HLSL→DXIL shader translation.
-- **Non-Blocking Background Shader Prep & HUD (`VictoryXCL`):** Prepares shader records asynchronously while yielding (`should_yield_background()`) to active render frames, shows progress in a top-right HUD overlay, and persists prepared records (`prepared-records-v1.bin`).
+- **Non-Blocking Background Shader Prep & HUD (`VictoryXCL`):** Prepares shader records asynchronously while yielding (`should_yield_background()`) to active render frames, shows progress in a top-right HUD overlay, and persists prepared records (`prepared-records-v2-<pack-key>.bin`).
 - **Visual Stability & Lighting (`VIctory` + `VictoryXCL` + `VIctory-Belobug-AMD`):** `XCL_NAN_GUARD` (`xcl_nan_guard` on pixel shader float exports) and sky-dome-only ambient tracking (`R16G16B16A16_FLOAT` filter in `ambient.rs`, rejecting `R11G11B10_FLOAT` to avoid frame-to-frame flicker).
 - **Loader Patches & Renderer Port 1 (`DoubleGhosty/cool_fox`):** Automatic 30 FPS / output-resolution loader patches, `Renderer Port 1` (`XCL_PORT_CONSTANTS=1`), 16 GB-aware coherent UMA sizing (`coherent_bytes_for()`), `lane_masks` (`st.halves`), and `XCL_WATCH_GAP_MB=64`.
 - **Release Profile, Write-Watch Coalescing & Memory Safety (`Belobug/VIctory-Belobug-AMD` + `VictoryXCL`):**
@@ -93,7 +93,7 @@ XCL is a compatibility layer that runs Xbox Series X|S (GDK) games you own on a 
 | **Unicorn Overlord**<br><sub>`SEGAofAmericaInc.Pa253b0c1Y` 1.0.0.6</sub> | ✅&nbsp;playable | fully playable | – |
 | **Fortnite**<br><sub>`436609B6.FortniteClient` 2.0.1461.7919</sub> | ✅&nbsp;works | works fully, as far as the game allows without its online services | the game itself is online-only (multiplayer servers) |
 | **XDefiant**<br><sub>`Ubisoft.XDefiant-Game` 1.0.0.186</sub> | ✅&nbsp;works | works fully, as far as the game allows without its servers | the game's own servers have been shut down |
-| **A newer retail game** (tested on RX 6600 8 GB + 16 GB RAM, `lockhart`) | 🚧&nbsp;**VictoryXCL** | boots directly without blocking on shader prep (top-right background HUD + persistent `prepared-records-v1.bin`), reaches **30 fps** in menus and 3D world stretches with `XCL_WATCH_COALESCE_MS`, `XCL_COHERENT_MB=2048`, `XCL_PSO_DISK_CACHE=1`, `XCL_NAN_GUARD=1`, and `XCL_AMBIENT=auto` | heavy streaming areas and cold PSO/DXC bursts can still dip FPS on 16 GB RAM; `XCL_RT_GATE=hold` keeps ray tracing disabled by default |
+| **A newer retail game** (tested on RX 6600 8 GB + 16 GB RAM, `lockhart`) | 🚧&nbsp;**VictoryXCL** | boots directly without blocking on shader prep (top-right background HUD + persistent `prepared-records-v2-<pack-key>.bin`), reaches **30 fps** in menus and 3D world stretches with `XCL_WATCH_COALESCE_MS`, `XCL_COHERENT_MB=2048`, `XCL_PSO_DISK_CACHE=1`, `XCL_NAN_GUARD=1`, and `XCL_AMBIENT=auto` | heavy streaming areas and cold PSO/DXC bursts can still dip FPS on 16 GB RAM; `XCL_RT_GATE=hold` keeps ray tracing disabled by default |
 
 ## Highlights
 
@@ -285,7 +285,7 @@ VictoryXCL rpf D:\data\shaders.rpf --extract NAME --out folder
 - When a game folder contains a `shaders.rpf` shader pack or loose `.dxbc` files under
   `shaders/`, **VictoryXCL** launches the title immediately and runs shader preparation
   in the background while rendering, showing progress in a top-right HUD overlay and
-  persisting completed records in `prepared-records-v1.bin` (yielding to active frames via
+  persisting successfully prepared pack records in `prepared-records-v2-<pack-key>.bin` (yielding to active frames via
   `should_yield_background()`). Null-renderer runs skip shader preparation.
 - **VictoryXCL performance & stability switches:**
   - `XCL_NAN_GUARD`: clamps `NaN`/`Inf` in pixel shader float exports (enabled by default; `0` disables).
