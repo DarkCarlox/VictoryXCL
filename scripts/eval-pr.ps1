@@ -39,7 +39,12 @@ function Resolve-TargetCommit {
     if ($PrNumber -gt 0) {
         $null = Get-Command gh -ErrorAction Stop
         Write-Host "[Phase 1] Fetching PR #$PrNumber metadata & ref (no checkout, no build)..."
-        $prJson = gh pr view $PrNumber --json number,title,author,headRefOid,baseRefName,state | ConvertFrom-Json
+        Push-Location $RepoRoot
+        try {
+            $prJson = gh pr view $PrNumber --json number,title,author,headRefOid,baseRefName,state | ConvertFrom-Json
+        } finally {
+            Pop-Location
+        }
         if (-not $prJson) { throw "Could not load PR #$PrNumber via gh" }
         Write-Host "  PR #$($prJson.number): $($prJson.title) by @$($prJson.author.login) (state: $($prJson.state), head: $($prJson.headRefOid))"
         git -C $RepoRoot fetch origin "pull/$PrNumber/head:refs/remotes/origin/pr-$PrNumber" 2>&1 | Out-Null
