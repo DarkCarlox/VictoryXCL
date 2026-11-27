@@ -261,12 +261,15 @@ try {
     if (Test-Path $d3d12Dir) {
         [Environment]::SetEnvironmentVariable('XCL_D3D12_DIR', $d3d12Dir, 'Process')
     }
+    $savedErr = $ErrorActionPreference
     try {
+        $ErrorActionPreference = 'Continue'
         $testArgs = @('test', '--release', '--manifest-path', (Join-Path $wtDir 'Cargo.toml'), '-p', 'xcl', '--lib')
         if ($TestFilter) { $testArgs += @('--', $TestFilter, '--test-threads=1') } else { $testArgs += @('--', '--test-threads=1') }
         $prTestOut = & cargo @testArgs 2>&1 | Tee-Object -Variable prTestLines
         $prTestExit = $LASTEXITCODE
     } finally {
+        $ErrorActionPreference = $savedErr
         [Environment]::SetEnvironmentVariable('XCL_D3D12_DIR', $savedD3d12, 'Process')
     }
     if ($prTestExit -ne 0) {
@@ -294,8 +297,12 @@ try {
     }
 
     Write-Host "Building release VictoryXCL.exe in isolated worktree..."
-    & cargo build --release --manifest-path (Join-Path $wtDir 'Cargo.toml') --bin VictoryXCL
-    if ($LASTEXITCODE -ne 0) {
+    $savedErr2 = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & cargo build --release --manifest-path (Join-Path $wtDir 'Cargo.toml') --bin VictoryXCL 2>&1 | Out-Host
+    $buildExit = $LASTEXITCODE
+    $ErrorActionPreference = $savedErr2
+    if ($buildExit -ne 0) {
         Write-Host "[VERDICT] REJECT: Release build failed." -ForegroundColor Red
         exit 1
     }
