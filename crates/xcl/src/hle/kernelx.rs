@@ -900,6 +900,25 @@ pub unsafe fn runtime_free(p: usize, attrs: u64) {
 /// GPU-visible memory (as MEM_GRAPHICS: sparse VRAM pool).
 pub unsafe extern "system" fn XMemVirtualAlloc(addr: *const c_void, size: usize, t: u32, attrs: u64, p: u32) -> *mut c_void {
     let a = XAllocAttrs::decode(attrs);
+    // Large 32-bit placeholder / 64 KiB physical reservations in alias mode stay below 4 GiB
+    // so `alias::arrange` can turn scattered mappings into one zero-copy UMA section stretch.
+    const ADDRESS_32BIT: u64 = 4;
+    if addr.is_null()
+        && alias::enabled()
+        && alias::port_constants_enabled()
+        && a.memory_type == 0
+        && (attrs & ADDRESS_32BIT) != 0
+        && (t & mem::MEM_RESERVE != 0)
+        && (t & mem::MEM_COMMIT == 0)
+        && ((t & MEM_64K_PAGES == MEM_64K_PAGES) || (t & 0x40000 != 0))
+        && size >= (16 << 20)
+    {
+        if let Some(q) = alias::reserve_low_space(size) {
+            mirrors::reserved(q, size, t, p);
+            trace_mem("XMemVirtualAlloc (32-bit port space)", 0, size, attrs, p, q);
+            return q as *mut c_void;
+        }
+    }
     let mut t = if a.memory_type != 0 { t | MEM_GRAPHICS } else { t };
     if a.memory_type != 0 && a.page_size == 2 {
         t |= 0x8000_0000;

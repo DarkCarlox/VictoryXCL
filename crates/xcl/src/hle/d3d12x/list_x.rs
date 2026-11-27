@@ -4341,6 +4341,9 @@ unsafe fn gpu_va(list: *mut c_void, va: u64, bytes: usize, what: &str, mirror: b
     if crate::gpu::uma::get().is_none_or(|u| u.contains(va as usize)) {
         return t;
     }
+    if let Some(resolved) = super::real::resolve_uma_va(va, bytes) {
+        return pc_va(resolved);
+    }
     // a buffer bound before has its mirror: no `readable` (a `VirtualQuery` walk of the title's
     // memory when it is not resident – most of a retail title's render thread at a bind per
     // draw); `sync_title_buffers` checks what it reads

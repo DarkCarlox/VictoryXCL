@@ -1887,15 +1887,16 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
         for _ in 0..threads {
             s.spawn(|| loop {
                 if startup.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) { break; }
+                while bg && !startup.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) && crate::hle::d3d12x::pso_async::should_yield_background() {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                if startup.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) { break; }
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 if i >= n {
                     break;
                 }
                 if persist.as_ref().is_some_and(|ps| ps.is_done(i)) {
                     continue;
-                }
-                while bg && !startup.is_some_and(|p| p.cancel.load(Ordering::Relaxed)) && crate::hle::d3d12x::pso_async::should_yield_background() {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
                 let record_done = || {
                     if let Some(ps) = &persist {

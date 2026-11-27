@@ -485,9 +485,8 @@ fn enqueue(p: Arc<Pending>) {
     );
 }
 
-/// Physical RAM & commit headroom thresholds (`min(ullAvailPhys, ullAvailPageFile)`) for
-/// throttling background PSO compilation well before Windows starts paging out the title
-/// (`XCL_PSO_MEM_THROTTLE=0`: off).
+/// OS virtual commit headroom thresholds (`ullAvailPageFile`) for throttling background PSO
+/// compilation well before Windows runs out of commit (`XCL_PSO_MEM_THROTTLE=0`: off).
 const PRELOAD_PAUSE_COMMIT: u64 = 2560 << 20;
 const WORKER_CAP_2_COMMIT: u64 = 2048 << 20;
 const WORKER_CAP_1_COMMIT: u64 = 1024 << 20;
@@ -497,11 +496,15 @@ fn mem_throttle_enabled() -> bool {
     *ON.get_or_init(|| !cfg!(test) && !std::env::var("XCL_PSO_MEM_THROTTLE").is_ok_and(|v| v.trim() == "0"))
 }
 
+fn commit_from_status(_avail_phys: u64, avail_page_file: u64) -> u64 {
+    avail_page_file
+}
+
 fn avail_commit_bytes() -> Option<u64> {
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
     let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
     m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
-    (unsafe { GlobalMemoryStatusEx(&mut m) } != 0).then_some(m.ullAvailPhys.min(m.ullAvailPageFile))
+    (unsafe { GlobalMemoryStatusEx(&mut m) } != 0).then_some(commit_from_status(m.ullAvailPhys, m.ullAvailPageFile))
 }
 
 /// Maximum concurrent top-level PSO worker builds allowed for the current available RAM/commit:
@@ -2806,6 +2809,13 @@ mod pso_queue_tests {
         assert!(wanted_active() >= 1);
         p.clear_wanted_active();
         p.clear_wanted_active(); // idempotent
+
+        // Low physical RAM alone (e.g. 880 MiB free on a 16 GiB host with Windows file cache)
+        // must not freeze background shader prep or throttle PSO workers when commit is healthy.
+        let commit_on_16gb = commit_from_status(880 << 20, 10 << 30);
+        assert_eq!(commit_on_16gb, 10 << 30);
+        assert_eq!(worker_cap_for_commit(Some(commit_on_16gb), 6), 6);
+        assert!(!should_pause_preload(Some(commit_on_16gb)));
         p.mark_wanted_active(); // post-DONE must not re-increment
         assert_eq!(p.wanted_state.load(Ordering::Acquire), WANTED_DONE);
     }

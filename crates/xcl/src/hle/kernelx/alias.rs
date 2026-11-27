@@ -31,13 +31,29 @@ pub fn enabled() -> bool {
     *ON.get_or_init(|| std::env::var("XCL_PAGE_ALIAS").is_ok_and(|v| v.trim() == "1"))
 }
 
+/// Renderer Port 1 (`XCL_PORT_CONSTANTS=1`, default on; `0` disables): keeps 32-bit graphics
+/// reservations ordered sequentially in their section so they can be mapped zero-copy into UMA.
+pub fn port_constants_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        let val = std::env::var("XCL_PORT_CONSTANTS")
+            .ok()
+            .or_else(|| std::env::var("VICTORY_PORT_CONSTANTS").ok());
+        val.map_or(true, |v| v.trim() != "0")
+    })
+}
+
+static LOW_RESERVATIONS: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+
 struct Block {
     section: Arc<Section>,
     /// XCL's own view of the whole block
     home: usize,
     /// pages not freed yet
     live: usize,
-    /// one bit a page: committed (asking Windows walked the rest of a block's uncommitted run –
+    /// logical page offset in block -> section slice index (remapped by `arrange` while fresh)
+    slice_map: Vec<usize>,
+    /// one bit per section slice: committed (asking Windows walked the rest of a block's uncommitted run –
     /// a retail title mapping 100 000 fresh pages one at a time waited 20 s for its first frame)
     committed: Arc<Vec<AtomicU64>>,
 }
@@ -63,19 +79,21 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
 }
 
 impl State {
-    /// (block's section, the page's index in it, its address in the home view) of page number `page`
+    /// (block's section, the page's slice index in it, its address in the home view) of page number `page`
     fn page(&self, page: usize) -> Option<(Arc<Section>, usize, usize)> {
         let index = page_index(page)?;
         let (&first, b) = self.blocks.range(..=index).next_back()?;
-        let i = index - first;
-        (i < b.section.pages()).then(|| (b.section.clone(), i, b.home + i * PAGE))
+        let rel = index - first;
+        let slice = *b.slice_map.get(rel)?;
+        Some((b.section.clone(), slice, b.home + slice * PAGE))
     }
 
-    /// The commit bits of page number `page`'s block and its index there.
+    /// The commit bits of page number `page`'s block and its slice index there.
     fn bits(&self, page: usize) -> Option<(Arc<Vec<AtomicU64>>, usize)> {
         let index = page_index(page)?;
         let (&first, b) = self.blocks.range(..=index).next_back()?;
-        (index - first < b.section.pages()).then(|| (b.committed.clone(), index - first))
+        let slice = *b.slice_map.get(index - first)?;
+        Some((b.committed.clone(), slice))
     }
 
     fn in_space(&self, at: usize) -> bool {
@@ -112,6 +130,16 @@ pub fn reserve_space(size: usize) -> Option<usize> {
     Some(at)
 }
 
+/// Reserve a 32-bit placeholder space below 4 GiB and track it in `LOW_RESERVATIONS` so
+/// scattered page mappings into it can be ordered contiguously (`Renderer Port 1`).
+pub fn reserve_low_space(size: usize) -> Option<usize> {
+    let len = size.checked_next_multiple_of(PAGE)?;
+    let at = unsafe { sections::reserve_below_4gb(len) }?;
+    with(|s| s.spaces.insert(at, len));
+    LOW_RESERVATIONS.lock().unwrap_or_else(|e| e.into_inner()).push((at, len));
+    Some(at)
+}
+
 /// Whether `p` lies in a space.
 pub fn in_space(p: usize) -> bool {
     enabled() && with(|s| s.in_space(p))
@@ -128,6 +156,8 @@ pub unsafe fn free_space(addr: usize, size: usize, t: u32) -> Option<bool> {
         }
         unmap_range(base, len);
         with(|s| s.spaces.remove(&base));
+        LOW_RESERVATIONS.lock().unwrap_or_else(|e| e.into_inner()).retain(|&(b, _)| b != base);
+        crate::hle::d3d12x::real::unregister_port_section(base);
         sections::release_all(base, len);
         return Some(true);
     }
@@ -168,7 +198,8 @@ pub unsafe fn allocate(n: usize, arr: *mut usize) -> bool {
         *arr.add(i) = page_number(first + i);
     }
     let committed = Arc::new((0..n.div_ceil(64)).map(|_| AtomicU64::new(0)).collect());
-    with(|s| s.blocks.insert(first, Block { section: Arc::new(section), home, live: n, committed }));
+    let slice_map = (0..n).collect();
+    with(|s| s.blocks.insert(first, Block { section: Arc::new(section), home, live: n, slice_map, committed }));
     true
 }
 
@@ -199,6 +230,103 @@ pub unsafe fn free(pages: &[usize]) {
     }
 }
 
+/// Before `pages` are mapped at `base`: if `base` lies in a 32-bit `LOW_RESERVATIONS`
+/// region whose pages all belong to a matching-size section, reassign fresh slices in
+/// reservation address order so scattered multi-piece mappings become one contiguous stretch.
+fn arrange(base: usize, pages: &[usize]) {
+    let Some((first, bytes)) = LOW_RESERVATIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .copied()
+        .find(|&(at, len)| at <= base && base.saturating_add(pages.len().saturating_mul(PAGE)) <= at + len)
+    else {
+        return;
+    };
+    let n_pages = bytes / PAGE;
+    with(|s| {
+        let Some(first_p) = pages.iter().copied().find(|&p| p != 0) else { return };
+        let Some(first_p_idx) = page_index(first_p) else { return };
+        let Some((&block_first, _)) = s.blocks.range(..=first_p_idx).next_back() else { return };
+        let mapped_slices: std::collections::HashSet<usize> = {
+            let Some(b) = s.blocks.get(&block_first) else { return };
+            if b.section.pages() != n_pages {
+                return;
+            }
+            let all_in_block = pages.iter().all(|&p| {
+                p != 0
+                    && page_index(p).is_some_and(|pi| pi >= block_first && pi - block_first < n_pages)
+            });
+            if !all_in_block {
+                return;
+            }
+            s.views
+                .values()
+                .filter(|(_, sec, _)| Arc::ptr_eq(sec, &b.section))
+                .map(|&(_, _, idx)| idx)
+                .collect()
+        };
+        let b = s.blocks.get_mut(&block_first).unwrap();
+        let fresh = |slice: usize, committed: &[AtomicU64]| -> bool {
+            committed[slice / 64].load(Ordering::Acquire) >> (slice % 64) & 1 == 0 && !mapped_slices.contains(&slice)
+        };
+        let mut owner: Vec<usize> = vec![0; n_pages];
+        for (rel, &slice) in b.slice_map.iter().enumerate() {
+            owner[slice] = rel;
+        }
+        let mut moved = 0u64;
+        for (i, &page) in pages.iter().enumerate() {
+            let want = (base - first) / PAGE + i;
+            let Some(rel) = page_index(page).map(|pi| pi - block_first) else { continue };
+            let have = b.slice_map[rel];
+            if have == want {
+                continue;
+            }
+            if !fresh(have, &b.committed) || !fresh(want, &b.committed) {
+                continue;
+            }
+            let other_rel = owner[want];
+            b.slice_map[other_rel] = have;
+            b.slice_map[rel] = want;
+            owner[have] = other_rel;
+            owner[want] = rel;
+            moved += 1;
+        }
+        if moved > 0 {
+            crate::xlog_info!("XMem: Renderer Port 1 arranged {moved} slice(s) at {base:#x} in address order");
+        }
+    });
+}
+
+fn maybe_register_port_stretch(base: usize, count: usize) {
+    let Some((first, bytes)) = LOW_RESERVATIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .copied()
+        .find(|&(at, len)| at <= base && base.saturating_add(count.saturating_mul(PAGE)) <= at + len)
+    else {
+        return;
+    };
+    let n_pages = bytes / PAGE;
+    let found = with(|s| {
+        let (_, first_sec, idx0) = s.views.get(&first)?;
+        if *idx0 != 0 || first_sec.pages() != n_pages {
+            return None;
+        }
+        for k in 1..n_pages {
+            let (_, sec, idx) = s.views.get(&(first + k * PAGE))?;
+            if *idx != k || !Arc::ptr_eq(sec, first_sec) {
+                return None;
+            }
+        }
+        Some(first_sec.handle() as usize)
+    });
+    if let Some(sec_handle) = found {
+        crate::hle::d3d12x::real::register_port_section(first, bytes, sec_handle);
+    }
+}
+
 /// Map `n` pages (`pages[i]`, 0: unmap) at `va`. Pages at an address in a space are views of
 /// them; elsewhere they are moved there. False with the last error set if a page is not one of
 /// the title's or Windows refuses.
@@ -207,12 +335,18 @@ pub unsafe fn map(va: usize, pages: &[usize]) -> bool {
         fnd::SetLastError(fnd::ERROR_INVALID_PARAMETER);
         return false;
     }
+    if port_constants_enabled() && !pages.is_empty() {
+        arrange(va, pages);
+    }
     for (i, &page) in pages.iter().enumerate() {
         let at = va + i * PAGE;
         if !map_one(at, page) {
             fnd::SetLastError(fnd::ERROR_INVALID_ADDRESS);
             return false;
         }
+    }
+    if port_constants_enabled() && !pages.is_empty() {
+        maybe_register_port_stretch(va, pages.len());
     }
     true
 }
@@ -575,6 +709,31 @@ mod tests {
             assert!(!map(s, &[page_number(1 << 40)]));
             assert!(!map(s + 4, &[0]), "an address not on a page boundary is refused");
             free_space(s, 0, mem::MEM_RELEASE);
+        }
+    }
+
+    #[test]
+    fn arrange_turns_scattered_32bit_heap_pieces_into_one_section_stretch() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let p = pages(4);
+        let low = reserve_low_space(4 * PAGE).expect("below 4 GiB placeholder");
+        assert!(low + 4 * PAGE <= (1usize << 32), "low reservation stays below 4 GiB: {low:#x}");
+        unsafe {
+            // Map the second half first, then the first half (scattered order).
+            assert!(map(low + 2 * PAGE, &p[..2]));
+            assert!(map(low, &p[2..4]));
+            // Verify slice indices in `views` are contiguous 0..4 in address order!
+            with(|s| {
+                for k in 0..4usize {
+                    let (_, _, slice_idx) = s.views.get(&(low + k * PAGE)).expect("mapped");
+                    assert_eq!(*slice_idx, k, "slice index at page {k} must match address offset");
+                }
+            });
+            // Write via one piece and verify reads stay intact.
+            write64(low + 2 * PAGE, 0xCAFE_BABE_1234_5678);
+            assert_eq!(read64(low + 2 * PAGE), 0xCAFE_BABE_1234_5678);
+            free_space(low, 0, mem::MEM_RELEASE);
+            free(&p);
         }
     }
 }

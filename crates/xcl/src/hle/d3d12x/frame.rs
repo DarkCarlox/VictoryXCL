@@ -43,11 +43,12 @@ const TOKEN_MASK: u64 = 0xFFFF_FFFF_FFFF;
 const KNOWN_TOKENS: usize = 64;
 const FLIPPED_KEEP: usize = 64;
 
-/// `XCL_FRAME_INTERVAL_US`: optional override for the console frame clock interval (µs).
+/// `XCL_FRAME_INTERVAL_US` (or `XCL_FRAME_INTERVAL_MS` / `VICTORY_FRAME_INTERVAL_MS`):
+/// optional override for the console frame clock interval.
 /// - unset: honor the title's `SetFrameIntervalX` interval (default)
 /// - `0` / `uncapped` / `off`: uncap `WaitFrameEventX` (return immediately with a fresh token)
-/// - positive µs (e.g. `8333` for 120 Hz, `4167` for 240 Hz): clamp the clock's effective interval
-///   to `min(requested, override)` (at least 1000 µs so the clock thread never busy-spins).
+/// - positive µs (e.g. `8333` for 120 Hz, `4167` for 240 Hz) or ms (e.g. `16.667`, `33.333`):
+///   clamp the clock's effective interval to `min(requested, override)` (at least 1000 µs).
 pub fn parse_interval_override(raw: Option<&str>) -> Option<u32> {
     let s = raw?.trim();
     if s.is_empty() {
@@ -59,9 +60,37 @@ pub fn parse_interval_override(raw: Option<&str>) -> Option<u32> {
     s.parse::<u32>().ok()
 }
 
+pub fn parse_interval_ms_override(raw: Option<&str>) -> Option<u32> {
+    let s = raw?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if s.eq_ignore_ascii_case("uncapped") || s.eq_ignore_ascii_case("off") {
+        return Some(0);
+    }
+    let ms = s.parse::<f64>().ok()?;
+    if !ms.is_finite() || ms < 0.0 || ms > 1000.0 {
+        return None;
+    }
+    if ms == 0.0 {
+        Some(0)
+    } else {
+        Some((ms * 1000.0).round().clamp(1.0, u32::MAX as f64) as u32)
+    }
+}
+
 fn interval_override() -> Option<u32> {
     static OVERRIDE: OnceLock<Option<u32>> = OnceLock::new();
-    *OVERRIDE.get_or_init(|| parse_interval_override(std::env::var("XCL_FRAME_INTERVAL_US").ok().as_deref()))
+    *OVERRIDE.get_or_init(|| {
+        parse_interval_override(std::env::var("XCL_FRAME_INTERVAL_US").ok().as_deref()).or_else(|| {
+            parse_interval_ms_override(
+                std::env::var("XCL_FRAME_INTERVAL_MS")
+                    .ok()
+                    .or_else(|| std::env::var("VICTORY_FRAME_INTERVAL_MS").ok())
+                    .as_deref(),
+            )
+        })
+    })
 }
 
 /// Effective clock thread interval (µs): `None` means uncapped (handled in `wait_frame_event_x`).
@@ -718,6 +747,21 @@ mod tests {
             assert_eq!(wait_frame_event_x(dev, 0, 200, std::ptr::null(), 0, &mut t), S_OK);
             assert_eq!(set_frame_interval_x(dev, std::ptr::null_mut(), 0, 0, 0), S_FALSE, "stops the clock");
         }
+    }
+
+    #[test]
+    fn interval_ms_override_parses_edge_cases() {
+        assert_eq!(parse_interval_ms_override(None), None);
+        assert_eq!(parse_interval_ms_override(Some("")), None);
+        assert_eq!(parse_interval_ms_override(Some("0")), Some(0));
+        assert_eq!(parse_interval_ms_override(Some("uncapped")), Some(0));
+        assert_eq!(parse_interval_ms_override(Some("OFF")), Some(0));
+        assert_eq!(parse_interval_ms_override(Some("16.667")), Some(16667));
+        assert_eq!(parse_interval_ms_override(Some("33.333")), Some(33333));
+        assert_eq!(parse_interval_ms_override(Some("8.333")), Some(8333));
+        assert_eq!(parse_interval_ms_override(Some("-5")), None);
+        assert_eq!(parse_interval_ms_override(Some("NaN")), None);
+        assert_eq!(parse_interval_ms_override(Some("1001")), None);
     }
 }
 

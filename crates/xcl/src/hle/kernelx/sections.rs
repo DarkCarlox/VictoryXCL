@@ -19,8 +19,9 @@ use std::ffi::c_void;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Memory::{
     CreateFileMappingW, MapViewOfFile3, UnmapViewOfFile2, VirtualAlloc, VirtualAlloc2, VirtualFree, VirtualQuery, MEMORY_BASIC_INFORMATION,
-    MEMORY_MAPPED_VIEW_ADDRESS, MEM_COMMIT, MEM_PRESERVE_PLACEHOLDER, MEM_RELEASE, MEM_REPLACE_PLACEHOLDER, MEM_RESERVE,
-    MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, PAGE_READWRITE, SEC_RESERVE, VIRTUAL_ALLOCATION_TYPE,
+    MEMORY_MAPPED_VIEW_ADDRESS, MEM_ADDRESS_REQUIREMENTS, MEM_COMMIT, MEM_EXTENDED_PARAMETER, MEM_PRESERVE_PLACEHOLDER, MEM_RELEASE,
+    MEM_REPLACE_PLACEHOLDER, MEM_RESERVE, MEM_RESERVE_PLACEHOLDER, MemExtendedParameterAddressRequirements, PAGE_NOACCESS, PAGE_READWRITE,
+    SEC_RESERVE, VIRTUAL_ALLOCATION_TYPE,
 };
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
@@ -52,6 +53,10 @@ impl Section {
         self.pages
     }
 
+    pub fn handle(&self) -> HANDLE {
+        self.handle
+    }
+
     /// Map pages `first..first + n` of the section at `at`, which must be a placeholder or lie in
     /// one (`reserve`). The view is one Windows mapping: `unmap` takes all of it at once.
     ///
@@ -61,13 +66,21 @@ impl Section {
         if n == 0 || first.checked_add(n).is_none_or(|end| end > self.pages) || !at.is_multiple_of(PAGE) {
             return false;
         }
-        let len = n * PAGE;
-        if !split(at, len) {
-            return false;
-        }
-        let v = MapViewOfFile3(self.handle, GetCurrentProcess(), at as *const c_void, (first * PAGE) as u64, len, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, std::ptr::null_mut(), 0);
-        v.Value as usize == at
+        map_view_at(self.handle, first, n, at)
     }
+}
+
+/// Map `n` 64 KiB pages from raw section `handle` starting at `first` into placeholder `at`.
+pub unsafe fn map_view_at(handle: HANDLE, first: usize, n: usize, at: usize) -> bool {
+    if n == 0 || !at.is_multiple_of(PAGE) {
+        return false;
+    }
+    let len = n * PAGE;
+    if !split(at, len) {
+        return false;
+    }
+    let v = MapViewOfFile3(handle, GetCurrentProcess(), at as *const c_void, (first * PAGE) as u64, len, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE, std::ptr::null_mut(), 0);
+    v.Value as usize == at
 }
 
 impl Drop for Section {
@@ -89,6 +102,23 @@ pub unsafe fn reserve(at: Option<usize>, len: usize) -> Option<usize> {
     let want = at.unwrap_or(0);
     let p = VirtualAlloc2(GetCurrentProcess(), want as *const c_void, len, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, std::ptr::null_mut(), 0) as usize;
     (p != 0 && (at.is_none() || p == want)).then_some(p)
+}
+
+/// Reserve `len` bytes of placeholder address space strictly below 4 GiB.
+pub unsafe fn reserve_below_4gb(len: usize) -> Option<usize> {
+    if len == 0 || !len.is_multiple_of(PAGE) {
+        return None;
+    }
+    let mut req = MEM_ADDRESS_REQUIREMENTS {
+        LowestStartingAddress: 0x1_0000 as *mut c_void,
+        HighestEndingAddress: u32::MAX as usize as *mut c_void,
+        Alignment: 0,
+    };
+    let mut param = MEM_EXTENDED_PARAMETER::default();
+    param.Anonymous1._bitfield = MemExtendedParameterAddressRequirements as u64;
+    param.Anonymous2.Pointer = (&raw mut req).cast();
+    let p = VirtualAlloc2(GetCurrentProcess(), std::ptr::null(), len, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, &mut param, 1) as usize;
+    (p != 0 && p + len <= (1usize << 32)).then_some(p)
 }
 
 /// The allocation `p` lies in: (base, size, state, type), from one VirtualQuery.

@@ -107,6 +107,8 @@ enum WindowKind {
 pub struct Uma {
     base: usize,
     kinds: Vec<WindowKind>,
+    /// Mapped zero-copy port sizes attached to otherwise unused `WindowKind::None` slots.
+    port_sizes: Mutex<[usize; MAX_HEAP_WINDOWS]>,
     /// VirtualAlloc base pointers owned by this Uma (freed on Drop)
     win_allocs: Vec<usize>,
     inner: Mutex<Inner>,
@@ -297,6 +299,7 @@ impl Uma {
             let u = Uma {
                 base,
                 kinds,
+                port_sizes: Mutex::new([0; MAX_HEAP_WINDOWS]),
                 win_allocs,
                 inner: Mutex::new(inner),
                 sparse_free: Mutex::new(sparse_free),
@@ -508,6 +511,7 @@ impl Uma {
                 return Some(Uma {
                     base,
                     kinds,
+                    port_sizes: Mutex::new([0; MAX_HEAP_WINDOWS]),
                     win_allocs,
                     inner: Mutex::new(inner),
                     sparse_free: Mutex::new(Default::default()),
@@ -546,9 +550,28 @@ impl Uma {
         let len = match self.kinds.get(k).copied().unwrap_or(WindowKind::None) {
             WindowKind::Committed(s) => s,
             WindowKind::Sparse => WINDOW,
-            WindowKind::None => 0,
+            WindowKind::None => self.port_sizes.lock().unwrap().get(k).copied().unwrap_or(0),
         };
         (self.base + k * WINDOW, len)
+    }
+
+    /// Claim an unused `WindowKind::None` slot for a mapped zero-copy port view of `bytes`.
+    pub fn claim_port_slot(&self, bytes: usize) -> Option<(usize, usize)> {
+        if bytes == 0 || bytes > MAX_SIZE {
+            return None;
+        }
+        let mut ports = self.port_sizes.lock().unwrap();
+        let k = (0..self.kinds.len())
+            .rev()
+            .find(|&i| matches!(self.kinds[i], WindowKind::None) && ports.get(i).copied() == Some(0))?;
+        ports[k] = bytes;
+        Some((k, self.base + k * WINDOW))
+    }
+
+    pub fn release_port_slot(&self, k: usize) {
+        if let Some(s) = self.port_sizes.lock().unwrap().get_mut(k) {
+            *s = 0;
+        }
     }
 
     /// Underlying write-watched `VirtualAlloc` regions `(base, size)` for `GetWriteWatch`:
@@ -805,32 +828,66 @@ fn coherent_file() -> std::path::PathBuf {
 /// Bytes the coherent window(s) are made with for a runtime layout of `windows` windows.
 pub fn coherent_hint_for(windows: usize) -> usize {
     let cap = max_coherent_bytes(windows);
-    if let Some(mb) = std::env::var("XCL_COHERENT_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
+    if let Some(mb) = std::env::var("XCL_COHERENT_MB").ok().and_then(|v| v.trim().parse::<usize>().ok()) {
         return (mb << 20).clamp(GRAIN, cap);
     }
     let title = std::fs::read_to_string(coherent_file()).ok().and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(0);
-    // only with the commit for all of it: the title's ~13 GB, video memory for its render targets
-    // and textures (WDDM charges commit for each video-memory allocation too) and the window
-    // itself – a retail game took ~18 GB; with less free it runs without (its GPU heaps outside
-    // unified memory: no image) rather than taking the system's commit
-    if title > 0 && free_commit() < NEEDS_FOR_COHERENT_HEAPS {
-        crate::xlog_warn!(
-            "UMA: {} MB of commit free, under {} MB: the title's GPU heaps stay outside unified memory (a larger page file gives them the coherent window)",
-            free_commit() >> 20,
-            NEEDS_FOR_COHERENT_HEAPS >> 20
-        );
-        return RUNTIME_COMMITTED_CAP;
+    let free = free_commit();
+    let reserve = coherent_commit_reserve();
+    let (chosen, capped_by_commit) = coherent_bytes_for(title, free, reserve, cap);
+    if capped_by_commit {
+        if chosen <= RUNTIME_COMMITTED_CAP {
+            crate::xlog_warn!(
+                "UMA: {} MB of commit free, under {} MB needed above reserve ({} MB): the title's GPU heaps stay outside unified memory",
+                free >> 20,
+                (reserve + RUNTIME_COMMITTED_CAP) >> 20,
+                reserve >> 20
+            );
+        } else {
+            crate::xlog_info!(
+                "UMA: {} MB of commit free — sizing coherent UMA to {} MB (of {} MB requested, keeping {} MB commit reserve)",
+                free >> 20,
+                chosen >> 20,
+                (title + RUNTIME_COMMITTED_CAP).min(cap) >> 20,
+                reserve >> 20
+            );
+        }
     }
-    (title + RUNTIME_COMMITTED_CAP).min(cap)
+    chosen
+}
+
+/// Commit headroom kept free for OS, sparse VRAM mappings, and title host RAM before sizing
+/// coherent UMA (`XCL_COMMIT_RESERVE_MB`, floored at `4 GiB` so 16 GiB systems fit ~4–8 GiB
+/// coherent heaps cleanly without starving commit).
+const COHERENT_COMMIT_RESERVE: usize = 4 << 30;
+
+fn coherent_commit_reserve() -> usize {
+    std::env::var("XCL_COMMIT_RESERVE_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|mb| (mb << 20).max(2 << 30))
+        .unwrap_or(COHERENT_COMMIT_RESERVE)
+}
+
+fn coherent_bytes_for(title: usize, free_commit_bytes: usize, reserve: usize, cap: usize) -> (usize, bool) {
+    let wanted = title.saturating_add(RUNTIME_COMMITTED_CAP).min(cap).max(RUNTIME_COMMITTED_CAP);
+    if title == 0 {
+        return (RUNTIME_COMMITTED_CAP, false);
+    }
+    let avail = free_commit_bytes.saturating_sub(reserve) & !(GRAIN - 1);
+    if avail >= wanted {
+        (wanted, false)
+    } else if avail > RUNTIME_COMMITTED_CAP {
+        (avail.min(cap), true)
+    } else {
+        (RUNTIME_COMMITTED_CAP, true)
+    }
 }
 
 /// Bytes the coherent window is made with (legacy 4-window cap).
 pub fn coherent_hint() -> usize {
     coherent_hint_for(MAX_WINDOWS)
 }
-
-/// Commit free before the title starts for its GPU heaps to go to the coherent window.
-const NEEDS_FOR_COHERENT_HEAPS: usize = 17 << 30;
 
 fn free_commit() -> usize {
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
@@ -1210,5 +1267,23 @@ mod tests {
         assert_eq!(u.window_of(a), Some(0));
         assert_eq!(u.window_of(b), Some(1));
         assert!(u.free(a) && u.free(b));
+    }
+
+    #[test]
+    fn coherent_bytes_for_fits_16gb_commit_headroom() {
+        let title_4_5g = 4_770_168_832usize;
+        let free_12_5g = 12_593usize << 20;
+        // 4-window cap = MAX_SIZE (4095 MiB): fits completely with 4 GiB reserve on 16 GiB host.
+        assert_eq!(coherent_bytes_for(title_4_5g, free_12_5g, COHERENT_COMMIT_RESERVE, max_coherent_bytes(MAX_WINDOWS)), (MAX_SIZE, false));
+        // 8-window cap = 5 * MAX_SIZE: full title + 512 MiB fits within 12.5 GiB - 4 GiB = 8.5 GiB.
+        assert_eq!(
+            coherent_bytes_for(title_4_5g, free_12_5g, COHERENT_COMMIT_RESERVE, max_coherent_bytes(8)),
+            (title_4_5g + RUNTIME_COMMITTED_CAP, false)
+        );
+        // Tighter commit (~6.5 GiB free, 4 GiB reserve -> ~2.5 GiB available) partially caps rather than dropping to 512 MiB.
+        let (partial, capped) = coherent_bytes_for(title_4_5g, (6 << 30) + (512 << 20), COHERENT_COMMIT_RESERVE, max_coherent_bytes(8));
+        assert!(capped && partial == (2 << 30) + (512 << 20));
+        // Critically low commit falls back cleanly to 512 MiB.
+        assert_eq!(coherent_bytes_for(title_4_5g, 4 << 30, COHERENT_COMMIT_RESERVE, max_coherent_bytes(8)), (RUNTIME_COMMITTED_CAP, true));
     }
 }

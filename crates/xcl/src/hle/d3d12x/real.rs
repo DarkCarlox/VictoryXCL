@@ -173,6 +173,9 @@ pub fn abi_root_signature() -> Option<ID3D12RootSignature> {
 /// `mem`, `mem1`.. of recompiled shaders. (buffer, GPU VA) per window, kept for the process
 /// lifetime.
 static UMA_BUFFER: std::sync::RwLock<Vec<(usize, u64)>> = std::sync::RwLock::new(Vec::new());
+/// `(title_base, title_end, uma_port_base)` zero-copy 32-bit port mappings (`Renderer Port 1`).
+static PORT_RANGES: std::sync::RwLock<Vec<(usize, usize, usize)>> = std::sync::RwLock::new(Vec::new());
+static PENDING_PORTS: Mutex<Vec<(usize, usize, usize)>> = Mutex::new(Vec::new());
 /// the committed UMA windows opened as D3D12 heaps (indexed by window `k`; `None` for sparse windows)
 static UMA_HEAPS: Mutex<Vec<Option<usize>>> = Mutex::new(Vec::new());
 /// console buffers placed in unified memory: resource → (address, bytes)
@@ -372,6 +375,10 @@ unsafe fn open_uma(device: &ID3D12Device) {
         w0_va
     );
     *UMA_HEAPS.lock().unwrap() = heaps;
+    let pending: Vec<(usize, usize, usize)> = std::mem::take(&mut *PENDING_PORTS.lock().unwrap());
+    for (title_base, bytes, section_handle) in pending {
+        let _ = mount_port_view(device, u, &mut bufs, title_base, bytes, section_handle);
+    }
     // shaders take the windows from the shared descriptor heap (`pso::heap_windows`)
     if n > 1 && crate::gpu::recomp::pso::heap_windows() {
         let views: Vec<(usize, usize)> = bufs.iter().enumerate().map(|(k, b)| (b.0, u.window(k).1)).collect();
@@ -380,6 +387,116 @@ unsafe fn open_uma(device: &ID3D12Device) {
         }
     }
     *UMA_BUFFER.write().unwrap() = bufs;
+}
+
+unsafe fn mount_port_view(
+    device: &ID3D12Device,
+    u: &crate::gpu::uma::Uma,
+    bufs: &mut Vec<(usize, u64)>,
+    title_base: usize,
+    bytes: usize,
+    section_handle: usize,
+) -> bool {
+    use crate::hle::kernelx::sections;
+    if PORT_RANGES.read().unwrap().iter().any(|&(b, e, _)| title_base >= b && title_base < e) {
+        return true;
+    }
+    let Some((slot, uma_base)) = u.claim_port_slot(bytes) else {
+        return false;
+    };
+    let pages = bytes / sections::PAGE;
+    let placeholder_ok = sections::reserve(Some(uma_base), bytes) == Some(uma_base);
+    let mapped_ok = placeholder_ok && sections::map_view_at(section_handle as windows_sys::Win32::Foundation::HANDLE, 0, pages, uma_base);
+    let committed_ok = mapped_ok && sections::commit(uma_base, bytes);
+    let opened = if committed_ok {
+        let dev3: Result<ID3D12Device3, _> = device.cast();
+        dev3.ok().and_then(|d3| {
+            let heap: ID3D12Heap = d3.OpenExistingHeapFromAddress(uma_base as *const c_void).ok()?;
+            let desc = D3D12_RESOURCE_DESC {
+                Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                Width: bytes as u64,
+                Height: 1,
+                DepthOrArraySize: 1,
+                MipLevels: 1,
+                SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER,
+                ..Default::default()
+            };
+            let mut buf: Option<ID3D12Resource> = None;
+            device.CreatePlacedResource(&heap, 0, &desc, D3D12_RESOURCE_STATE_COMMON, None, &mut buf).ok()?;
+            let buf = buf?;
+            let va = buf.GetGPUVirtualAddress();
+            Some((buf.into_raw() as usize, va))
+        })
+    } else {
+        None
+    };
+    let Some((buf_raw, va)) = opened else {
+        if mapped_ok {
+            sections::unmap(uma_base);
+        }
+        if placeholder_ok {
+            sections::release_all(uma_base, bytes);
+        }
+        u.release_port_slot(slot);
+        return false;
+    };
+    if slot >= bufs.len() {
+        bufs.resize(slot + 1, (0, 0));
+    }
+    bufs[slot] = (buf_raw, va);
+    if let Some(h_slot) = UMA_HEAPS.lock().unwrap().get_mut(slot) {
+        // Keep the heap pointer null/separate; individual placed buffers resolve through window slot `slot`.
+        let _ = h_slot;
+    }
+    PORT_RANGES.write().unwrap().push((title_base, title_base + bytes, uma_base));
+    crate::xlog_info!(
+        "D3D12.X: Renderer Port 1 mapped 32-bit section {title_base:#x}..{:#x} ({} MB) -> UMA window {slot} at {uma_base:#x} (zero-copy)",
+        title_base + bytes,
+        bytes >> 20
+    );
+    true
+}
+
+/// Expose a contiguous 32-bit `Section` stretch inside an unused UMA window slot so GPU shaders
+/// and buffer bindings access it in-place with zero copies (`XCL_PORT_CONSTANTS=1`).
+pub fn register_port_section(title_base: usize, bytes: usize, section_handle: usize) {
+    if bytes == 0 || section_handle == 0 || !crate::hle::kernelx::alias::port_constants_enabled() {
+        return;
+    }
+    if PORT_RANGES.read().unwrap().iter().any(|&(b, e, _)| title_base >= b && title_base < e) {
+        return;
+    }
+    let raw = device_raw();
+    let Some(dev) = (unsafe { ID3D12Device::from_raw_borrowed(&raw) }) else {
+        let mut p = PENDING_PORTS.lock().unwrap();
+        if !p.iter().any(|&(b, _, _)| b == title_base) {
+            p.push((title_base, bytes, section_handle));
+        }
+        return;
+    };
+    let Some(u) = crate::gpu::uma::get() else { return };
+    let mut bufs = UMA_BUFFER.write().unwrap();
+    if unsafe { mount_port_view(dev, u, &mut bufs, title_base, bytes, section_handle) } {
+        if let Some((slot, _)) = PORT_RANGES
+            .read()
+            .unwrap()
+            .iter()
+            .find(|&&(b, _, _)| b == title_base)
+            .and_then(|&(_, _, ub)| u.window_of(ub).map(|k| (k, ub)))
+        {
+            let res_raw = bufs.get(slot).map_or(0, |b| b.0);
+            unsafe {
+                super::console_heap::update_window_view(slot, res_raw, bytes);
+            }
+        }
+    }
+}
+
+pub fn unregister_port_section(title_base: usize) {
+    PENDING_PORTS.lock().unwrap().retain(|&(b, _, _)| b != title_base);
+    PORT_RANGES.write().unwrap().retain(|&(b, _, _)| b != title_base);
 }
 
 pub fn stats() -> D3d12Stats {
@@ -1527,6 +1644,12 @@ pub(super) fn resolve_uma_va(va: u64, len: usize) -> Option<u64> {
             return Some(va);
         }
         return None;
+    }
+    if let Some(mapped) = PORT_RANGES.read().unwrap().iter().find_map(|&(tb, te, ub)| {
+        let end = start.checked_add(len)?;
+        (start >= tb && end <= te).then(|| ub + (start - tb))
+    }) {
+        return Some(mapped as u64);
     }
     if let Some(mapped) = lookup_outside_buffer(start, len) {
         return Some(mapped as u64);

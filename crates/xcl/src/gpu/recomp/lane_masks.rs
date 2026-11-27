@@ -231,10 +231,12 @@ enum SccKind {
 
 /// The masks at a program point. `regs[r]`: the lane function of the mask SGPR r holds (wave64:
 /// in the pair's first register), None when it holds nothing the analysis knows as a mask.
-/// EXEC always has one. `scc`: (lane function, how hardware reduces the wave's bits to SCC).
+/// `halves[r]`: in wave64 mode, tracks whether individual 32-bit SGPRs hold the low (`false`) or
+/// high (`true`) half of a known mask across `S_MOV_B32` spill/restore moves.
 #[derive(Clone, PartialEq)]
 struct State {
     regs: Vec<Option<B>>,
+    halves: Vec<Option<(B, bool)>>,
     scc: Option<(B, SccKind)>,
 }
 
@@ -493,7 +495,20 @@ impl<'a> Lanes<'a> {
             193 => Some(TRUE),
             255 if d.literal == Some(0) => Some(FALSE),
             255 if d.literal == Some(!0) && !self.wave64 => Some(TRUE),
-            c if c < 128 => st.regs[c as usize],
+            c if c < 128 => {
+                let c = c as usize;
+                if let Some(v) = st.regs[c] {
+                    return Some(v);
+                }
+                if self.wave64 && c + 1 < 128 {
+                    if let (Some((a, false)), Some((b, true))) = (st.halves[c], st.halves[c + 1]) {
+                        if a == b {
+                            return Some(a);
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
@@ -597,6 +612,16 @@ impl<'a> Lanes<'a> {
                 scc = Some(if name == cmp.0 { (self.bdd.not(x)?, SccKind::All) } else { (x, SccKind::Any) });
             }
         }
+        let mut set_half: Option<(usize, (B, bool))> = None;
+        if self.wave64 && name == "S_MOV_B32" {
+            let s0 = fv("SSRC0").unwrap_or(255) as usize;
+            let sd = fv("SDST").map(|v| v as usize);
+            if let (Some(sd), true) = (sd.filter(|&r| r < 128), s0 < 128) {
+                if let Some(h) = st.halves[s0] {
+                    set_half = Some((sd, h));
+                }
+            }
+        }
         // whatever else the instruction writes is no longer a known mask
         for r in (0..128).filter(|&r| kill >> r & 1 != 0) {
             self.kill(st, r);
@@ -604,6 +629,13 @@ impl<'a> Lanes<'a> {
         for (r, v) in set {
             self.kill(st, r);
             st.regs[r] = Some(v);
+            if self.wave64 && r + 1 < 128 {
+                st.halves[r] = Some((v, false));
+                st.halves[r + 1] = Some((v, true));
+            }
+        }
+        if let Some((sd, h)) = set_half {
+            st.halves[sd] = Some(h);
         }
         if st.regs[EXEC].is_none() {
             st.regs[EXEC] = Some(self.atom(Atom::Opaque(d.pc, EXEC), block)?);
@@ -630,6 +662,7 @@ impl<'a> Lanes<'a> {
 
     fn kill(&self, st: &mut State, r: usize) {
         st.regs[r] = None;
+        st.halves[r] = None;
         // wave64: the pair starting one register lower
         if self.wave64 && r > 0 {
             st.regs[r - 1] = None;
@@ -743,10 +776,18 @@ impl<'a> Lanes<'a> {
                 edges.push((*fact, st.clone()));
             }
         }
-        let mut st = State { regs: vec![None; 128], scc: None };
+        let mut st = State { regs: vec![None; 128], halves: vec![None; 128], scc: None };
         st.regs[EXEC] = Some(FALSE);
         if edges.is_empty() {
             return Ok((reach, st));
+        }
+        if self.wave64 {
+            for r in 0..128 {
+                let first = edges[0].1.halves[r];
+                if first.is_some() && edges.iter().all(|(_, s)| s.halves[r] == first) {
+                    st.halves[r] = first;
+                }
+            }
         }
         // an SCC a mask op set on any incoming edge, back edges included (their masks may not
         // count here, but a lane's own SCC carried around a loop is still a lane's: thehollowedone,
@@ -804,11 +845,16 @@ impl<'a> Lanes<'a> {
 
     fn analyze(mut self) -> R<Summary> {
         let n = self.blocks.len();
-        let mut entry = State { regs: vec![None; 128], scc: None };
+        let mut entry = State { regs: vec![None; 128], halves: vec![None; 128], scc: None };
         entry.regs[EXEC] = Some(match self.launch {
             LaunchExec::All => TRUE,
             LaunchExec::Unknown => self.atom(Atom::Launch, 0)?,
         });
+        if self.wave64 {
+            let e = entry.regs[EXEC].unwrap();
+            entry.halves[EXEC] = Some((e, false));
+            entry.halves[EXEC + 1] = Some((e, true));
+        }
         let mut forced = HashSet::new();
         let mut reach = vec![FALSE; n];
         let mut ins: Vec<Option<State>> = vec![None; n];
@@ -1220,5 +1266,38 @@ mod tests {
         assert_eq!(run(&[CMP, and_mask, vmov_scc, ENDPGM]).err(), Some("a scalar read of the SCC of a mask op, with lanes in EXEC without its bit"));
         // when SCC agrees across every active lane (s_and_saveexec), explicit SRC_SCC is sound
         assert!(run(&[CMP, save_and, smov_scc, ENDPGM]).is_ok());
+    }
+
+    #[test]
+    fn split_scalar_copies_across_a_branch_preserve_both_words_of_wave64_mask() {
+        let mov_exec_s4: I = ("S_MOV_B64", "ENC_SOP1", &[("SDST", 126), ("SSRC0", 4)]);
+        // Save EXEC (= all lanes under LaunchExec::All) via split 32-bit moves through s[2:3] -> s[4:5],
+        // restore EXEC, and check MOV2 needs no guard only when both halves are preserved.
+        let good: [I; 9] = [
+            ("S_CMP_EQ_U32", "ENC_SOPC", &[("SSRC0", 0), ("SSRC1", 1)]),
+            ("S_CBRANCH_SCC1", "ENC_SOPP", &[("SIMM16", 5)]),
+            ("S_MOV_B32", "ENC_SOP1", &[("SDST", 2), ("SSRC0", 126)]),
+            ("S_MOV_B32", "ENC_SOP1", &[("SDST", 3), ("SSRC0", 127)]),
+            ("S_MOV_B32", "ENC_SOP1", &[("SDST", 4), ("SSRC0", 2)]),
+            ("S_MOV_B32", "ENC_SOP1", &[("SDST", 5), ("SSRC0", 3)]),
+            mov_exec_s4,
+            MOV2,
+            ENDPGM,
+        ];
+        let s = run(&good).unwrap();
+        assert!(s.guarded.is_empty(), "both halves of EXEC preserved: MOV2 needs no guard, got {:?}", s.guarded);
+
+        // Corrupted high word (reads exec_lo instead of exec_hi): falls back to Opaque, so MOV2 requires a guard.
+        let bad: [I; 7] = [
+            ("S_MOV_B32", "ENC_SOP1", &[("SDST", 2), ("SSRC0", 126)]),
+            ("S_MOV_B32", "ENC_SOP1", &[("SDST", 3), ("SSRC0", 126)]),
+            ("S_MOV_B32", "ENC_SOP1", &[("SDST", 4), ("SSRC0", 2)]),
+            ("S_MOV_B32", "ENC_SOP1", &[("SDST", 5), ("SSRC0", 3)]),
+            mov_exec_s4,
+            MOV2,
+            ENDPGM,
+        ];
+        let s_bad = run(&bad).unwrap();
+        assert_eq!(s_bad.guarded.len(), 1, "corrupted half pair must stay opaque and keep guard");
     }
 }

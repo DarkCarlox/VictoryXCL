@@ -1749,18 +1749,18 @@ unsafe fn upload_queue(dev: &ID3D12Device, device: usize) -> Result<ID3D12Comman
 /// retail game's intro video had its submitting thread at 42 % in GetWriteWatch with a 1 MiB gap
 /// (thousands of calls before each submit over its mapped sparse tiles). The pages of a gap are
 /// reported as written too; the uploads keep to what they track.
+fn parse_watch_gap_mb(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(64)
+        .saturating_mul(1 << 20)
+}
+
 fn watch_gap() -> usize {
     if cfg!(test) {
         return 64 << 20;
     }
     static GAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *GAP.get_or_init(|| {
-        std::env::var("XCL_WATCH_GAP_MB")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(2)
-            .saturating_mul(1 << 20)
-    })
+    *GAP.get_or_init(|| parse_watch_gap_mb(std::env::var("XCL_WATCH_GAP_MB").ok().as_deref()))
 }
 
 /// The parts of `wanted` (start, end) inside `regions` (base, size), merged (gaps under
@@ -2777,6 +2777,12 @@ mod tests {
         // a region between two merged ranges, and one past them all
         let regions = [(0x2000_0000, 0x10_0000), (0x9000_0000, 0x1000)];
         assert_eq!(watch_ranges(&regions, vec![(0x1000_0000, 0x1000_1000), (0x2008_0000, 0x2009_0000)]), vec![(0x2008_0000, 0x1_0000)]);
+
+        assert_eq!(parse_watch_gap_mb(None), 64 << 20);
+        assert_eq!(parse_watch_gap_mb(Some("")), 64 << 20);
+        assert_eq!(parse_watch_gap_mb(Some("bad")), 64 << 20);
+        assert_eq!(parse_watch_gap_mb(Some("0")), 0);
+        assert_eq!(parse_watch_gap_mb(Some(" 128 ")), 128 << 20);
     }
 
     /// The textures of a batch detiled on several threads come back as on one: complete and in

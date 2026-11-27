@@ -423,6 +423,24 @@ pub fn window_views_ready() -> bool {
     WINDOW_VIEWS_READY.load(std::sync::atomic::Ordering::Acquire)
 }
 
+/// Update a single `MEM_HEAP_BASE + slot` descriptor in the live shared descriptor heap
+/// (used when a zero-copy port window is mapped after `set_window_views` initialized).
+pub unsafe fn update_window_view(slot: usize, res_raw: usize, bytes: usize) -> bool {
+    if !window_views_ready() || slot >= crate::gpu::uma::MAX_HEAP_WINDOWS || res_raw == 0 || bytes == 0 {
+        return false;
+    }
+    let (device, cpu, inc) = {
+        let g = GLOBAL.read().unwrap();
+        let Some(s) = g.as_ref() else { return false };
+        (s.dev.clone(), s.cpu, s.inc)
+    };
+    let raw = res_raw as *mut std::ffi::c_void;
+    let Some(r) = ID3D12Resource::from_raw_borrowed(&raw) else { return false };
+    let at = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: (cpu + (crate::gpu::recomp::MEM_HEAP_BASE as u64 + slot as u64) * inc as u64) as usize };
+    device.CreateUnorderedAccessView(r, None::<&ID3D12Resource>, Some(&crate::gpu::recomp::runner::raw_window_uav(bytes as u64)), at);
+    true
+}
+
 /// The memory windows' buffers `(resource, bytes)` as raw UAVs at `MEM_HEAP_BASE + k` of the
 /// shared heap, made now if need be (`Options::heap_windows`: shaders take window k from there).
 /// Active windows (`bytes > 0`) in wider layouts (8 / 16) must all have a valid buffer; unused
