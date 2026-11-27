@@ -69,7 +69,7 @@ XCL is a compatibility layer that runs Xbox Series X|S (GDK) games you own on a 
 | **Unicorn Overlord**<br><sub>`SEGAofAmericaInc.Pa253b0c1Y` 1.0.0.6</sub> | ✅&nbsp;playable | fully playable | – |
 | **Fortnite**<br><sub>`436609B6.FortniteClient` 2.0.1461.7919</sub> | ✅&nbsp;works | works fully, as far as the game allows without its online services | the game itself is online-only (multiplayer servers) |
 | **XDefiant**<br><sub>`Ubisoft.XDefiant-Game` 1.0.0.186</sub> | ✅&nbsp;works | works fully, as far as the game allows without its servers | the game's own servers have been shut down |
-| **A newer retail game** | 🚧&nbsp;**≈&nbsp;60&nbsp;%**<br><sub>estimate</sub> | starts in ~4 s, runs at a steady 30 fps without a crash, shows its menus and goes on past the first one to its settings; fits a 32 GB machine (~15 GB committed in the menus). With the NVIDIA integration branch ([#2057](https://github.com/xcl-dev/xcl/pull/2057)) it goes on into its 3D world: **~5 fps there** on an RTX 5090 (14 fps on average over a whole 5-minute run, its menus and loading included) | not playable yet: the picture of the world is incomplete (its minimap and other mesh pipelines are refused), and it does not keep running there for long |
+| **A newer retail game** (tested on RX 6600 8 GB + 16 GB RAM, `lockhart`) | 🚧&nbsp;**VictoryXCL** | boots directly without blocking on shader prep (top-right background HUD + persistent `prepared-records-v1.bin`), reaches **30 fps** in menus and 3D world stretches with `XCL_WATCH_COALESCE_MS`, `XCL_COHERENT_MB=2048`, `XCL_PSO_DISK_CACHE=1`, `XCL_NAN_GUARD=1`, and `XCL_AMBIENT=auto` | heavy streaming areas and cold PSO/DXC bursts can still dip FPS on 16 GB RAM; `XCL_RT_GATE=hold` keeps ray tracing disabled by default |
 
 ## Highlights
 
@@ -120,19 +120,19 @@ measurements: [`HANDOFF.md`](HANDOFF.md).
 1. **Build** – Windows 10 / 11 x64, Rust and the Windows SDK ([all requirements](#building-and-usage)):
 
    ```powershell
-   cargo build --release --workspace
+   cargo build --release --bin VictoryXCL
    ```
 
 2. **Look at your game** – its unpacked files, the folder that holds `MicrosoftGame.config`:
 
    ```powershell
-   target\release\xcl.exe inspect D:\Game\game.exe
+   target\release\VictoryXCL.exe inspect D:\Game\game.exe
    ```
 
-3. **Run it** – or open `xcl.exe` from Explorer and choose the game:
+3. **Run it** – or open `VictoryXCL.exe` from Explorer and choose the game:
 
    ```powershell
-   target\release\xcl.exe run D:\Game
+   target\release\VictoryXCL.exe run D:\Game
    ```
 
 A gamepad is recommended ([Controls](#controls)). The game folder is never modified.
@@ -242,32 +242,34 @@ next to `xcl.exe`, directly next to `xcl.exe`, in `%LOCALAPPDATA%\XCL\D3D12\`, o
   Test results on other GPUs: [#42](https://github.com/ivall/xcl/issues/42).
 
 ```powershell
-cargo build --release --workspace          # target\release\xcl.exe
+cargo build --release --bin VictoryXCL     # target\release\VictoryXCL.exe
 
-xcl inspect D:\Game\game.exe               # the game's imports and what XCL has for them
-xcl run D:\Game [-- game arguments]        # run
-xcl disasm <shader.bin> [--hex]            # RDNA2 disassembler (console containers too)
-xcl shaders D:\data\shaders.rpf --top 50   # pack statistics; --recomp / --compile N
-xcl shaders D:\data\shaders.rpf --precompile --only cs --pipelines   # build compute pipelines and save driver blobs for the next run
-xcl shaders D:\data\shaders.rpf --precompile --only cs --pipelines --used-only   # only the compute pipelines an earlier run of the title used
-xcl shaders D:\data\shaders.rpf --export-hlsl out --record-hash HEX  # exact compute HLSL for investigation
-xcl shaders D:\data\shaders.rpf --measure-pso HEX --repeat 3         # cold driver PSO timing (cache disabled)
-xcl rpf D:\data\shaders.rpf --extract NAME --out folder
+VictoryXCL inspect D:\Game\game.exe        # the game's imports and what VictoryXCL has for them
+VictoryXCL run D:\Game [-- game arguments] # run
+VictoryXCL disasm <shader.bin> [--hex]     # RDNA2 disassembler (console containers too)
+VictoryXCL shaders D:\data\shaders.rpf --top 50   # pack statistics; --recomp / --compile N
+VictoryXCL shaders D:\data\shaders.rpf --precompile --only cs --pipelines   # build compute pipelines and save driver blobs for the next run
+VictoryXCL shaders D:\data\shaders.rpf --precompile --only cs --pipelines --used-only   # only the compute pipelines an earlier run of the title used
+VictoryXCL shaders D:\data\shaders.rpf --export-hlsl out --record-hash HEX  # exact compute HLSL for investigation
+VictoryXCL shaders D:\data\shaders.rpf --measure-pso HEX --repeat 3         # cold driver PSO timing (cache disabled)
+VictoryXCL rpf D:\data\shaders.rpf --extract NAME --out folder
 ```
 
 <details>
-<summary><b>Switches, caches, logs and the files XCL writes</b></summary>
+<summary><b>Switches, caches, logs and the files VictoryXCL writes</b></summary>
 
 - When a game folder contains a `shaders.rpf` shader pack or loose `.dxbc` files under
-  `shaders/`, XCL shows shader preparation in the game window before executing title code.
-  The same window then presents the game. The percentage counts
-  processed records. The timer counts seconds since one finished (or preparation started);
-  five seconds without progress counts as a stall, and the window shows when the last one ended.
-  XCL prepares supported shader stages and compute pipelines, including
-  split pieces and their whole fallback. Graphics pipelines that need state supplied by the
-  title are created during play. Later launches reuse matching cache entries.
-  Closing the window cancels the launch. A compiler or driver failure stops it and reports
-  the cause. Null-renderer runs skip shader preparation. With presentation disabled, the gate runs without a window.
+  `shaders/`, **VictoryXCL** launches the title immediately and runs shader preparation
+  in the background while rendering, showing progress in a top-right HUD overlay and
+  persisting completed records in `prepared-records-v1.bin` (yielding to active frames via
+  `should_yield_background()`). Null-renderer runs skip shader preparation.
+- **VictoryXCL performance & stability switches:**
+  - `XCL_NAN_GUARD`: clamps `NaN`/`Inf` in pixel shader float exports (enabled by default; `0` disables).
+  - `XCL_PORT_CONSTANTS=1`: enables Renderer Port 1 constant handling (`cool_fox`).
+  - `XCL_WATCH_GAP_MB=64` & `XCL_WATCH_COALESCE_MS=12`: reduces `GetWriteWatch` overhead across UMA/sparse windows.
+  - `XCL_COHERENT_MB=2048` & `XCL_COMMIT_RESERVE_MB=4096`: tunes coherent UMA and commit headroom for 16 GB RAM hosts.
+  - `XCL_PSO_DISK_CACHE=1`, `XCL_PSO_FRAME_BUDGET_MS=40`, `XCL_PSO_FRAME_WAIT_MS=16`: persists AMD driver PSO blobs on disk and reduces stand-in flicker.
+  - `XCL_AMBIENT=auto` & `XCL_RT_GATE=hold`: uses sky-dome-only (`R16G16B16A16_FLOAT`) ambient fallback while ray tracing is held.
 - For compute shaders that XCL can split, the runtime first tries the saved driver blob for
   the whole shader. A usable blob lets the GPU run it in one dispatch. If the blob is missing
   or the driver rejects it, XCL builds the split pieces.
