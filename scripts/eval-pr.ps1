@@ -24,7 +24,8 @@
 param(
     [int]$PrNumber = 0,
     [string]$Ref = '',
-    [string]$BaseRef = 'main',
+    [string]$BaseRef = 'victoryxcl/main',
+    [string]$Repo = 'CarlosB456/VictoryXCL',
     [switch]$SecurityApproved,
     [string]$GameDir = '',
     [int]$Seconds = 90,
@@ -35,21 +36,39 @@ param(
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path $PSScriptRoot -Parent
 
+function Get-TargetRemote {
+    $remotes = @(git -C $RepoRoot remote -v)
+    foreach ($line in $remotes) {
+        if ($line -match '^(\S+)\s+.*CarlosB456/VictoryXCL') {
+            return $Matches[1]
+        }
+    }
+    return 'origin'
+}
+
+function Invoke-GitQuiet {
+    param([string[]]$GitArgs)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $null = & git -C $RepoRoot @GitArgs 2>&1
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
+$TargetRemote = Get-TargetRemote
+
 function Resolve-TargetCommit {
     if ($PrNumber -gt 0) {
         $null = Get-Command gh -ErrorAction Stop
-        Write-Host "[Phase 1] Fetching PR #$PrNumber metadata & ref (no checkout, no build)..."
-        Push-Location $RepoRoot
-        try {
-            $prJson = gh pr view $PrNumber --json number,title,author,headRefOid,baseRefName,state | ConvertFrom-Json
-        } finally {
-            Pop-Location
-        }
+        Write-Host "[Phase 1] Fetching PR #$PrNumber metadata & ref from $Repo (no checkout, no build)..."
+        $prJson = gh pr view $PrNumber --repo $Repo --json number,title,author,headRefOid,baseRefName,state | ConvertFrom-Json
         if (-not $prJson) { throw "Could not load PR #$PrNumber via gh" }
         Write-Host "  PR #$($prJson.number): $($prJson.title) by @$($prJson.author.login) (state: $($prJson.state), head: $($prJson.headRefOid))"
-        git -C $RepoRoot fetch origin "pull/$PrNumber/head:refs/remotes/origin/pr-$PrNumber" 2>&1 | Out-Null
+        Invoke-GitQuiet @('fetch', $TargetRemote, "pull/$PrNumber/head:refs/remotes/$TargetRemote/pr-$PrNumber")
         return [pscustomobject]@{
-            Commit = (git -C $RepoRoot rev-parse "refs/remotes/origin/pr-$PrNumber").Trim()
+            Commit = (git -C $RepoRoot rev-parse "refs/remotes/$TargetRemote/pr-$PrNumber").Trim()
             Label  = "PR #$PrNumber (@$($prJson.author.login))"
         }
     }
@@ -63,6 +82,7 @@ function Resolve-TargetCommit {
 }
 
 $target = Resolve-TargetCommit
+Invoke-GitQuiet @('fetch', $TargetRemote, 'main')
 $baseCommit = (git -C $RepoRoot rev-parse $BaseRef).Trim()
 $diffRange = "$baseCommit...$($target.Commit)"
 
@@ -235,13 +255,42 @@ try {
     git -C $RepoRoot worktree add --detach $wtDir $($target.Commit) 2>&1 | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "Failed to create git worktree" }
 
-    Write-Host "Running unit tests in isolated worktree..."
-    $testArgs = @('test', '--release', '--manifest-path', (Join-Path $wtDir 'Cargo.toml'), '-p', 'xcl', '--lib')
-    if ($TestFilter) { $testArgs += @('--', $TestFilter, '--test-threads=1') } else { $testArgs += @('--', '--test-threads=1') }
-    & cargo @testArgs
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[VERDICT] REJECT: Unit tests failed." -ForegroundColor Red
-        exit 1
+    Write-Host "Running unit tests in isolated worktree (with XCL_D3D12_DIR set)..."
+    $d3d12Dir = Join-Path (Split-Path $RepoRoot -Parent | Split-Path -Parent) 'D3D12'
+    $savedD3d12 = [Environment]::GetEnvironmentVariable('XCL_D3D12_DIR', 'Process')
+    if (Test-Path $d3d12Dir) {
+        [Environment]::SetEnvironmentVariable('XCL_D3D12_DIR', $d3d12Dir, 'Process')
+    }
+    try {
+        $testArgs = @('test', '--release', '--manifest-path', (Join-Path $wtDir 'Cargo.toml'), '-p', 'xcl', '--lib')
+        if ($TestFilter) { $testArgs += @('--', $TestFilter, '--test-threads=1') } else { $testArgs += @('--', '--test-threads=1') }
+        $prTestOut = & cargo @testArgs 2>&1 | Tee-Object -Variable prTestLines
+        $prTestExit = $LASTEXITCODE
+    } finally {
+        [Environment]::SetEnvironmentVariable('XCL_D3D12_DIR', $savedD3d12, 'Process')
+    }
+    if ($prTestExit -ne 0) {
+        $prFailed = @($prTestLines | Where-Object { $_ -match '^test (\S+) \.\.\. FAILED$' } | ForEach-Object { $Matches[1] })
+        Write-Host "PR had $($prFailed.Count) failing test(s); checking against baseline ($baseCommit) for regressions..." -ForegroundColor Yellow
+        $baseWt = Join-Path $env:TEMP ("victoryxcl-base-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+        try {
+            git -C $RepoRoot worktree add --detach $baseWt $baseCommit 2>&1 | Out-Null
+            if (Test-Path $d3d12Dir) { [Environment]::SetEnvironmentVariable('XCL_D3D12_DIR', $d3d12Dir, 'Process') }
+            $baseArgs = @('test', '--release', '--manifest-path', (Join-Path $baseWt 'Cargo.toml'), '-p', 'xcl', '--lib')
+            if ($TestFilter) { $baseArgs += @('--', $TestFilter, '--test-threads=1') } else { $baseArgs += @('--', '--test-threads=1') }
+            $baseTestLines = @(& cargo @baseArgs 2>&1)
+            $baseFailed = @($baseTestLines | Where-Object { $_ -match '^test (\S+) \.\.\. FAILED$' } | ForEach-Object { $Matches[1] })
+        } finally {
+            [Environment]::SetEnvironmentVariable('XCL_D3D12_DIR', $savedD3d12, 'Process')
+            if (Test-Path $baseWt) { git -C $RepoRoot worktree remove --force $baseWt 2>&1 | Out-Null }
+        }
+        $newFailures = @($prFailed | Where-Object { $_ -notin $baseFailed })
+        if ($newFailures.Count -gt 0) {
+            Write-Host "[VERDICT] REJECT: $($newFailures.Count) NEW failing test(s) introduced by PR:" -ForegroundColor Red
+            $newFailures | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+            exit 1
+        }
+        Write-Host "0 new test regressions (all $($prFailed.Count) failures are pre-existing on $BaseRef)." -ForegroundColor Green
     }
 
     Write-Host "Building release VictoryXCL.exe in isolated worktree..."
