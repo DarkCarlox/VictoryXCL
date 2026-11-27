@@ -288,6 +288,7 @@ VictoryXCL rpf D:\data\shaders.rpf --extract NAME --out folder
   persisting successfully prepared pack records in `prepared-records-v2-<pack-key>.bin` (yielding to active frames via
   `should_yield_background()`). Null-renderer runs skip shader preparation.
 - **VictoryXCL performance & stability switches:**
+  - `XCL_OUTPUT`: when the title presents its main plane at the requested size, larger overlays are composited into that output size.
   - `XCL_NAN_GUARD`: clamps `NaN`/`Inf` in pixel shader float exports (enabled by default; `0` disables).
   - `XCL_PORT_CONSTANTS=1`: enables Renderer Port 1 constant handling (`cool_fox`).
   - `XCL_WATCH_GAP_MB=64` & `XCL_WATCH_COALESCE_MS=12`: reduces `GetWriteWatch` overhead across UMA/sparse windows.

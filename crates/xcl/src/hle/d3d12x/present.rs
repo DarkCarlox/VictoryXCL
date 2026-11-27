@@ -1061,6 +1061,19 @@ fn needs_compositor(planes: &[(ID3D12Resource, D3D12_RESOURCE_DESC, [f32; 4])]) 
     planes.len() > 1 || planes.first().is_some_and(|(_, _, uv)| *uv != [0.0, 0.0, 1.0, 1.0])
 }
 
+fn presentation_size(
+    primary: (u32, u32),
+    overlays: impl Iterator<Item = (u32, u32)>,
+    requested: Option<(u32, u32)>,
+) -> (u32, u32) {
+    if requested == Some(primary) {
+        // The title already honored the explicit output on its main plane. Composite
+        // overlays onto that canvas even when the title keeps them at a larger resolution.
+        return primary;
+    }
+    overlays.fold(primary, |(w, h), (ow, oh)| (w.max(ow), h.max(oh)))
+}
+
 unsafe fn present_now(min_interval: Duration, frame: Option<(usize, Vec<(usize, Option<[i32; 4]>)>)>) {
     if IN_PRESENT.with(|c| c.replace(true)) {
         return;
@@ -1114,13 +1127,14 @@ unsafe fn present_now(min_interval: Duration, frame: Option<(usize, Vec<(usize, 
     if p.disabled || p.last.elapsed() < min_interval {
         return;
     }
-    let (w, h) = if resolved.len() == 1 {
-        (resolved[0].1.Width as u32, resolved[0].1.Height)
-    } else {
-        let mw = resolved.iter().map(|(_, d, _)| d.Width as u32).max().unwrap_or(0);
-        let mh = resolved.iter().map(|(_, d, _)| d.Height).max().unwrap_or(0);
-        (mw, mh)
-    };
+    static REQUESTED_OUTPUT: OnceLock<Option<(u32, u32)>> = OnceLock::new();
+    let requested = *REQUESTED_OUTPUT.get_or_init(crate::loader_patches::resolution::asked_output);
+    let primary = &resolved[0].1;
+    let (w, h) = presentation_size(
+        (primary.Width as u32, primary.Height),
+        resolved[1..].iter().map(|(_, d, _)| (d.Width as u32, d.Height)),
+        requested,
+    );
     let Some(fmt) = swap_format(resolved[0].1.Format) else { return };
     let Some(hwnd) = ensure_window() else { return };
     if p.queue != queue {
@@ -1539,6 +1553,16 @@ impl Drop for Presenter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_present_output_uses_the_main_plane_when_the_title_honors_it() {
+        let main = (1920, 1080);
+        let overlays = [(3840, 2160), (1280, 720)];
+        assert_eq!(super::presentation_size(main, overlays.into_iter(), Some(main)), main);
+        assert_eq!(super::presentation_size(main, std::iter::empty(), Some(main)), main);
+        assert_eq!(super::presentation_size(main, overlays.into_iter(), None), (3840, 2160));
+        assert_eq!(super::presentation_size(main, overlays.into_iter(), Some((1280, 720))), (3840, 2160));
+    }
+
     use super::*;
 
     #[test]
