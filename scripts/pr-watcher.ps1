@@ -75,7 +75,10 @@ foreach ($pr in ($prs | Sort-Object number)) {
         continue
     }
     # Also verify GitHub comments for the marker in case local state was cleared
+    $prevErr2 = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     $comments = & gh pr view $pr.number --repo $Repo --json comments --jq '.comments[].body' 2>$null
+    $ErrorActionPreference = $prevErr2
     if ($comments -and ($comments -match [regex]::Escape("victoryxcl-eval:$($pr.headRefOid)"))) {
         $evaluated[$key] = [pscustomobject]@{ pr = $pr.number; head = $pr.headRefOid; decision = 'already-commented'; at = (Get-Date -Format o) }
         $evaluated | ConvertTo-Json -Depth 4 | Set-Content $StateFile -Encoding utf8
